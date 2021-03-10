@@ -90,6 +90,10 @@ static inline NvmeNamespace *nvme_subsys_ns(NvmeSubsystem *subsys,
 #define NVME_NS(obj) \
     OBJECT_CHECK(NvmeNamespace, (obj), TYPE_NVME_NS)
 
+#define NVME_KV_MAX_NUM_KEYS UINT32_MAX
+#define NVME_KV_MAX_KEY_SIZE 16
+#define NVME_KV_MAX_VAL_SIZE (4 * 1024)
+
 typedef struct NvmeZone {
     NvmeZoneDescr   d;
     uint64_t        w_ptr;
@@ -125,7 +129,16 @@ typedef struct NvmeNamespaceParams {
     uint32_t numzrwa;
     uint64_t zrwas;
     uint64_t zrwafg;
+
+    bool     kv;
 } NvmeNamespaceParams;
+
+typedef struct NvmeKVPair {
+    uint8_t key[16];
+    size_t kl;
+    uint8_t val[4096];
+    bool used;
+} NvmeKVPair;
 
 typedef struct NvmeNamespace {
     DeviceState  parent_obj;
@@ -154,6 +167,7 @@ typedef struct NvmeNamespace {
 
     NvmeIdNsZoned   *id_ns_zoned;
     NvmeZone        *zone_array;
+    NvmeIdNsKV      *id_ns_kv;
     QTAILQ_HEAD(, NvmeZone) exp_open_zones;
     QTAILQ_HEAD(, NvmeZone) imp_open_zones;
     QTAILQ_HEAD(, NvmeZone) closed_zones;
@@ -171,6 +185,11 @@ typedef struct NvmeNamespace {
     struct {
         uint32_t err_rec;
     } features;
+
+    struct {
+        NvmeKVPair* pairs;
+        size_t entries_allocated;
+    } kv;
 } NvmeNamespace;
 
 static inline uint32_t nvme_nsid(NvmeNamespace *ns)
@@ -500,6 +519,7 @@ typedef struct NvmeCtrl {
         };
 
         uint32_t                async_config;
+        uint32_t                ednek;
         NvmeHostBehaviorSupport hbs;
     } features;
 
