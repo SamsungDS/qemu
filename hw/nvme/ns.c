@@ -327,6 +327,27 @@ static void nvme_ns_init_zoned(NvmeNamespace *ns)
     ns->id_ns_zoned = id_ns_z;
 }
 
+static void nvme_ns_init_kv(NvmeNamespace *ns)
+{
+    NvmeIdNsKV *id_ns_kv = g_malloc0(sizeof(NvmeIdNsKV));
+
+    ns->csi = NVME_CSI_KV;
+    ns->id_ns_kv = id_ns_kv;
+
+    id_ns_kv->nsze = NVME_KV_MAX_NUM_KEYS *
+        (NVME_KV_MAX_KEY_SIZE + NVME_KV_MAX_VAL_SIZE);
+    id_ns_kv->nuse = 0x00;
+    id_ns_kv->nkvf = 0x01;
+
+    /* include the only supported (for now) format */
+    id_ns_kv->kvf[0].mnk = NVME_KV_MAX_NUM_KEYS;
+    id_ns_kv->kvf[0].kml = NVME_KV_MAX_KEY_SIZE;
+    id_ns_kv->kvf[0].vml = NVME_KV_MAX_VAL_SIZE;
+
+    ns->kv.entries_allocated = 16;
+    ns->kv.pairs = g_malloc0(ns->kv.entries_allocated * sizeof(NvmeKVPair));
+}
+
 static void nvme_clear_zone(NvmeNamespace *ns, NvmeZone *zone)
 {
     uint8_t state;
@@ -666,6 +687,9 @@ int nvme_ns_setup(NvmeNamespace *ns, Error **errp)
         }
         nvme_ns_init_zoned(ns);
     }
+    if (ns->params.kv) {
+        nvme_ns_init_kv(ns);
+    }
 
     if (ns->endgrp && ns->endgrp->fdp.enabled) {
         if (!nvme_ns_init_fdp(ns, errp)) {
@@ -825,6 +849,7 @@ static Property nvme_ns_props[] = {
     DEFINE_PROP_BOOL("eui64-default", NvmeNamespace, params.eui64_default,
                      false),
     DEFINE_PROP_STRING("fdp.ruhs", NvmeNamespace, params.fdp.ruhs),
+    DEFINE_PROP_BOOL("kv", NvmeNamespace, params.kv, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

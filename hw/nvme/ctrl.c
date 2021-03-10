@@ -247,6 +247,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_COMMAND_SET_PROFILE]      = true,
     [NVME_FDP_MODE]                 = true,
     [NVME_FDP_EVENTS]               = true,
+    [NVME_KV_EDNEK]                 = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -260,6 +261,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_COMMAND_SET_PROFILE]      = NVME_FEAT_CAP_CHANGE,
     [NVME_FDP_MODE]                 = NVME_FEAT_CAP_CHANGE,
     [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
+    [NVME_KV_EDNEK]                 = NVME_FEAT_CAP_CHANGE,
 };
 
 static const uint32_t nvme_cse_acs[256] = {
@@ -308,6 +310,14 @@ static const uint32_t nvme_cse_iocs_zoned[256] = {
     [NVME_CMD_ZONE_APPEND]          = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_CMD_ZONE_MGMT_SEND]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_CMD_ZONE_MGMT_RECV]       = NVME_CMD_EFF_CSUPP,
+};
+
+static const uint32_t nvme_cse_iocs_kv[256] = {
+    [NVME_CMD_KV_STORE]             = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [NVME_CMD_KV_RETRIEVE]          = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [NVME_CMD_KV_DELETE]            = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [NVME_CMD_KV_EXIST]             = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+    [NVME_CMD_KV_LIST]              = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
 };
 
 static void nvme_process_sq(void *opaque);
@@ -4399,6 +4409,220 @@ static uint16_t nvme_io_mgmt_send(NvmeCtrl *n, NvmeRequest *req)
     };
 }
 
+static bool nvme_kv_key_match(NvmeKVCmd *cmd, NvmeKVPair *existing_kv_pair)
+{
+    int ret;
+
+    if (!existing_kv_pair->used) {
+        return false;
+    }
+
+    if (cmd->cdw11.kl != existing_kv_pair->kl) {
+        return false;
+    }
+
+    if (memcmp(&cmd->key, &existing_kv_pair->key, MIN(cmd->cdw11.kl, 8)) != 0) {
+        return false;
+    }
+
+    ret = memcmp(&cmd->key_hi, ((uint8_t *)existing_kv_pair->key) + 8,
+                 MIN(cmd->cdw11.kl - 8, 8));
+    if (ret && cmd->cdw11.kl > 8) {
+        return false;
+    }
+
+    return true;
+};
+
+static uint16_t nvme_kv_store(NvmeCtrl *n, NvmeRequest *req)
+{
+    NvmeKVCmd *kv_cmd = (NvmeKVCmd *)&req->cmd;
+    NvmeIdNsKV *kv_ns = req->ns->id_ns_kv;
+
+    int fst_empty = -1;
+
+    // The spec doesn't clearly define what an "invalid" key size is, and it
+    // doesn't define "Invalid Field" as the other KV commands.
+    if (kv_cmd->cdw11.kl > 16){
+        return NVME_KV_INVALID_KEY_SIZE;
+    }
+
+    if (kv_cmd->hbs > NVME_KV_MAX_VAL_SIZE){
+        return NVME_KV_INVALID_VAL_SIZE;
+    }
+
+    for (size_t i = 0; i < req->ns->kv.entries_allocated; i++) {
+        if (fst_empty < 0 && req->ns->kv.pairs[i].used == false) {
+            fst_empty = i;
+        }
+        if (nvme_kv_key_match(kv_cmd, &req->ns->kv.pairs[i])) {
+            if (kv_cmd->cdw11.ro & NVME_CMD_KV_STORE_OPT_DONT_STORE_IF_KEY_EXISTS) {
+                return NVME_KV_KEY_EXISTS;
+            }
+
+            // Overwrite existing key-value
+            return nvme_h2c(n, req->ns->kv.pairs[i].val, kv_cmd->hbs, req);
+        }
+    }
+
+    if (kv_cmd->cdw11.ro & NVME_CMD_KV_STORE_OPT_DONT_STORE_IF_KEY_NOT_EXISTS) {
+        return NVME_KV_KEY_NOT_EXISTS;
+    }
+
+    // We ran through the list, and there are no more free entries.
+    // Realloc with more space.
+    if (fst_empty < 0) {
+        size_t new_entries = req->ns->kv.entries_allocated * 2;
+
+        void* new_alloc = g_realloc(req->ns->kv.pairs, new_entries * sizeof(NvmeKVPair));
+        if (!new_alloc) {
+            return NVME_CAP_EXCEEDED;
+        }
+        memset(
+            new_alloc + req->ns->kv.entries_allocated * sizeof(NvmeKVPair),
+            0,
+            (new_entries - req->ns->kv.entries_allocated) * sizeof(NvmeKVPair)
+        );
+
+        // The new allocation must have a free entry at first address
+        fst_empty = req->ns->kv.entries_allocated;
+
+        req->ns->kv.pairs = new_alloc;
+        req->ns->kv.entries_allocated = new_entries;
+    }
+
+    // Insert data in entry
+    memcpy((void *)&req->ns->kv.pairs[fst_empty].key, &kv_cmd->key,
+            MIN(kv_cmd->cdw11.kl, 8));
+
+    if (kv_cmd->cdw11.kl > 8) {
+        memcpy((void *)&req->ns->kv.pairs[fst_empty].key + 8,
+                &kv_cmd->key_hi, MIN(kv_cmd->cdw11.kl - 8, 8));
+    }
+
+    req->ns->kv.pairs[fst_empty].kl = MIN(kv_cmd->cdw11.kl, 16);
+    req->ns->kv.pairs[fst_empty].used = true;
+    kv_ns->nuse += NVME_KV_MAX_KEY_SIZE + NVME_KV_MAX_VAL_SIZE;
+
+    return nvme_h2c(n, req->ns->kv.pairs[fst_empty].val, kv_cmd->hbs, req);
+}
+
+static uint16_t nvme_kv_retrieve(NvmeCtrl *n, NvmeRequest *req)
+{
+    NvmeKVCmd *kv_cmd = (NvmeKVCmd *)&req->cmd;
+
+    if (kv_cmd->cdw11.kl > 16){
+        return NVME_INVALID_FIELD;
+    }
+
+    for (size_t i = 0; i < req->ns->kv.entries_allocated; i++) {
+        if (nvme_kv_key_match(kv_cmd, &req->ns->kv.pairs[i])) {
+            return nvme_c2h(n, req->ns->kv.pairs[i].val,
+                            MIN(kv_cmd->hbs, NVME_KV_MAX_VAL_SIZE), req);
+        }
+    }
+
+    return NVME_KV_KEY_NOT_EXISTS;
+}
+
+static uint16_t nvme_kv_delete(NvmeCtrl *n, NvmeRequest *req)
+{
+    NvmeKVCmd *kv_cmd = (NvmeKVCmd *)&req->cmd;
+    NvmeIdNsKV *kv_ns = req->ns->id_ns_kv;
+
+    if (kv_cmd->cdw11.kl > 16){
+        return NVME_INVALID_FIELD;
+    }
+
+    for (size_t i = 0; i < req->ns->kv.entries_allocated; i++) {
+        NvmeKVPair empty_pair = {};
+
+        if (nvme_kv_key_match(kv_cmd, &req->ns->kv.pairs[i])) {
+            req->ns->kv.pairs[i] = empty_pair;
+            kv_ns->nuse -= NVME_KV_MAX_KEY_SIZE + NVME_KV_MAX_VAL_SIZE;
+            return NVME_SUCCESS;
+        }
+    }
+
+    if (n->features.ednek & 0x01) {
+        return NVME_KV_KEY_NOT_EXISTS;
+    }
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_kv_exist(NvmeCtrl *n, NvmeRequest *req)
+{
+    NvmeKVCmd *kv_cmd = (NvmeKVCmd *)&req->cmd;
+
+    if (kv_cmd->cdw11.kl > 16){
+        return NVME_INVALID_FIELD;
+    }
+
+    for (size_t i = 0; i < req->ns->kv.entries_allocated; i++) {
+        if (nvme_kv_key_match(kv_cmd, &req->ns->kv.pairs[i])) {
+            return NVME_SUCCESS;
+        }
+    }
+    return NVME_KV_KEY_NOT_EXISTS;
+}
+
+static uint16_t nvme_kv_list(NvmeCtrl *n, NvmeRequest *req)
+{
+    NvmeKVCmd *kv_cmd = (NvmeKVCmd *)&req->cmd;
+    size_t kls_size = sizeof(uint16_t);
+    size_t rds_size = sizeof(uint32_t);
+    uint8_t *rds_ptr = g_malloc0(rds_size);
+    uint8_t *kds_ptr = NULL;
+    uint16_t *nrk = (uint16_t *)rds_ptr;
+    size_t kds_size = 0;
+    size_t kds_size_wo_pad = 0;
+
+    if (kv_cmd->cdw11.kl > 16){
+        return NVME_INVALID_FIELD;
+    }
+
+    // We have to pre-search the entries to see if the key exists.
+    // If none is found, we'll just list from the first entry.
+    size_t first_entry = 0;
+    for (size_t i = 0; i < req->ns->kv.entries_allocated; i++) {
+        if (nvme_kv_key_match(kv_cmd, &req->ns->kv.pairs[i])) {
+            first_entry = i;
+            break;
+        }
+    }
+
+    for (size_t i = first_entry; i < req->ns->kv.entries_allocated; i++) {
+        if (req->ns->kv.pairs[i].used) {
+            kds_size_wo_pad = kls_size + req->ns->kv.pairs[i].kl;
+            kds_size = kds_size_wo_pad + kds_size_wo_pad % 4;
+
+            rds_ptr = realloc(rds_ptr, rds_size + kds_size);
+            nrk = (uint16_t *)rds_ptr;
+
+            if (rds_size + kds_size > kv_cmd->hbs) {
+                // Host buffer full
+                break;
+            }
+
+            if (kds_size_wo_pad < kds_size) {
+                memset((uint8_t *)rds_ptr + rds_size + kds_size_wo_pad, 0x0,
+                       kds_size - kds_size_wo_pad);
+            }
+
+            kds_ptr = rds_ptr + rds_size;
+            rds_size += kds_size;
+            memcpy(kds_ptr, &req->ns->kv.pairs[i].kl, kls_size);
+            memcpy(kds_ptr + kls_size, &req->ns->kv.pairs[i].key,
+                   req->ns->kv.pairs[i].kl);
+
+            *nrk = *nrk + 1;
+        }
+    }
+
+    return nvme_c2h(n, rds_ptr, rds_size, req);
+}
+
 static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeNamespace *ns;
@@ -4453,6 +4677,25 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
     }
 
     req->ns = ns;
+
+    if (req->ns->csi == NVME_CSI_KV) {
+        switch (req->cmd.opcode) {
+        case NVME_CMD_KV_STORE:
+            return nvme_kv_store(n, req);
+        case NVME_CMD_KV_RETRIEVE:
+            return nvme_kv_retrieve(n, req);
+        case NVME_CMD_KV_DELETE:
+            return nvme_kv_delete(n, req);
+        case NVME_CMD_KV_EXIST:
+            return nvme_kv_exist(n, req);
+        case NVME_CMD_KV_LIST:
+            return nvme_kv_list(n, req);
+        default:
+            assert(false);
+        }
+
+        return NVME_INVALID_OPCODE | NVME_DNR;
+    }
 
     switch (req->cmd.opcode) {
     case NVME_CMD_WRITE_ZEROES:
@@ -4922,6 +5165,9 @@ static uint16_t nvme_cmd_effects(NvmeCtrl *n, uint8_t csi, uint32_t buf_len,
         case NVME_CSI_NVM:
             src_iocs = nvme_cse_iocs_nvm;
             break;
+        case NVME_CSI_KV:
+            src_iocs = nvme_cse_iocs_kv;
+            break;
         case NVME_CSI_ZONED:
             src_iocs = nvme_cse_iocs_zoned;
             break;
@@ -5382,6 +5628,9 @@ static uint16_t nvme_identify_ctrl_csi(NvmeCtrl *n, NvmeRequest *req)
         ((NvmeIdCtrlZoned *)&id)->zasl = n->params.zasl;
         break;
 
+    case NVME_CSI_KV:
+        return nvme_rpt_empty_id_struct(n, req);
+
     default:
         return NVME_INVALID_FIELD | NVME_DNR;
     }
@@ -5555,6 +5804,8 @@ static uint16_t nvme_identify_ns_csi(NvmeCtrl *n, NvmeRequest *req,
     } else if (c->csi == NVME_CSI_ZONED && ns->csi == NVME_CSI_ZONED) {
         return nvme_c2h(n, (uint8_t *)ns->id_ns_zoned, sizeof(NvmeIdNsZoned),
                         req);
+    } else if (c->csi == NVME_CSI_KV && ns->csi == NVME_CSI_KV) {
+        return nvme_c2h(n, (uint8_t *)ns->id_ns_kv, sizeof(NvmeIdNsKV), req);
     }
 
     return NVME_INVALID_FIELD | NVME_DNR;
@@ -6041,6 +6292,9 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
             return ret;
         }
         goto out;
+    case NVME_KV_EDNEK:
+        result = n->features.ednek;
+        goto out;
     default:
         break;
     }
@@ -6322,6 +6576,9 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
         return NVME_CMD_SEQ_ERROR | NVME_DNR;
     case NVME_FDP_EVENTS:
         return nvme_set_feature_fdp_events(n, ns, req);
+    case NVME_KV_EDNEK:
+        n->features.ednek = dw11;
+        break;
     default:
         return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
     }
@@ -6379,6 +6636,9 @@ static void nvme_select_iocs_ns(NvmeCtrl *n, NvmeNamespace *ns)
         } else if (NVME_CC_CSS(cc) == NVME_CC_CSS_NVM) {
             ns->iocs = nvme_cse_iocs_nvm;
         }
+        break;
+    case NVME_CSI_KV:
+        ns->iocs = nvme_cse_iocs_kv;
         break;
     }
 }

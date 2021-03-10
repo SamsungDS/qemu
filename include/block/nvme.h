@@ -598,6 +598,25 @@ typedef struct QEMU_PACKED NvmeCmd {
     uint32_t    cdw15;
 } NvmeCmd;
 
+typedef struct NvmeKVCmd {
+    uint8_t     opcode;
+    uint8_t     flags;
+    uint16_t    cid;
+    uint32_t    nsid;
+    uint64_t    key;
+    uint64_t    mptr;
+    NvmeCmdDptr dptr;
+    uint32_t    hbs; // Host Buffer Size/Value Size
+    struct {
+        uint8_t kl;
+        uint8_t ro; // (RO on retrieve, SO on Store)
+        uint16_t rsvd;
+    } cdw11;
+    uint32_t    cdw12;
+    uint32_t    cdw13;
+    uint64_t    key_hi;
+} NvmeKVCmd;
+
 #define NVME_CMD_FLAGS_FUSE(flags) (flags & 0x3)
 #define NVME_CMD_FLAGS_PSDT(flags) ((flags >> 6) & 0x3)
 
@@ -639,6 +658,17 @@ enum NvmeIoCommands {
     NVME_CMD_ZONE_MGMT_SEND     = 0x79,
     NVME_CMD_ZONE_MGMT_RECV     = 0x7a,
     NVME_CMD_ZONE_APPEND        = 0x7d,
+    NVME_CMD_KV_STORE           = 0x01,
+    NVME_CMD_KV_RETRIEVE        = 0x02,
+    NVME_CMD_KV_DELETE          = 0x10,
+    NVME_CMD_KV_EXIST           = 0x14,
+    NVME_CMD_KV_LIST            = 0x06,
+};
+
+enum NvmeCmdKVStoreOpt {
+    NVME_CMD_KV_STORE_OPT_DONT_STORE_IF_KEY_NOT_EXISTS = 1 << 0,
+    NVME_CMD_KV_STORE_OPT_DONT_STORE_IF_KEY_EXISTS     = 1 << 1,
+    NVME_CMD_KV_STORE_OPT_COMPRESS      = 1 << 2,
 };
 
 typedef struct QEMU_PACKED NvmeDeleteQ {
@@ -939,6 +969,10 @@ enum NvmeStatusCodes {
     NVME_CMD_SIZE_LIMIT         = 0x0183,
     NVME_INVALID_ZONE_OP        = 0x01b6,
     NVME_NOZRWA                 = 0x01b7,
+    NVME_KV_INVALID_VAL_SIZE    = 0x0185,
+    NVME_KV_INVALID_KEY_SIZE    = 0x0186,
+    NVME_KV_KEY_NOT_EXISTS      = 0x0187,
+    NVME_KV_KEY_EXISTS          = 0x0189,
     NVME_ZONE_BOUNDARY_ERROR    = 0x01b8,
     NVME_ZONE_FULL              = 0x01b9,
     NVME_ZONE_READ_ONLY         = 0x01ba,
@@ -1289,6 +1323,7 @@ enum NvmeFeatureIds {
     NVME_COMMAND_SET_PROFILE        = 0x19,
     NVME_FDP_MODE                   = 0x1d,
     NVME_FDP_EVENTS                 = 0x1e,
+    NVME_KV_EDNEK                   = 0x20,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_FID_MAX                    = 0x100,
 };
@@ -1347,6 +1382,15 @@ typedef struct QEMU_PACKED NvmeLBAFE {
     uint8_t     zdes;
     uint8_t     rsvd9[7];
 } NvmeLBAFE;
+
+typedef struct QEMU_PACKED NvmeKVF {
+    uint16_t    kml;
+    uint8_t     rsvd2;
+    uint8_t     fopt;
+    uint32_t    vml;
+    uint32_t    mnk;
+    uint8_t     rsvd12[4];
+} NvmeKVF;
 
 #define NVME_NSID_BROADCAST 0xffffffff
 #define NVME_MAX_NLBAF 64
@@ -1441,6 +1485,7 @@ enum NvmeIdNsNmic {
 
 enum NvmeCsi {
     NVME_CSI_NVM                = 0x00,
+    NVME_CSI_KV                 = 0x01,
     NVME_CSI_ZONED              = 0x02,
 };
 
@@ -1472,6 +1517,28 @@ enum NvmeIdNsZonedOzcs {
 enum NvmeIdNsZonedZrwacap {
     NVME_ID_NS_ZONED_ZRWACAP_EXPFLUSHSUP = 1 << 0,
 };
+typedef struct QEMU_PACKED NvmeIdNsKV {
+    uint64_t    nsze;
+    uint8_t     rsvd8[8];
+    uint64_t    nuse;
+    uint8_t     nsfeat;
+    uint8_t     nkvf;
+    uint8_t     nmic;
+    uint8_t     rescap;
+    uint8_t     fpi;
+    uint8_t     rsvd29[3];
+    uint32_t    novg;
+    uint32_t    anagrpid;
+    uint8_t     rsvd40[3];
+    uint8_t     nsattr;
+    uint16_t    nvmsetid;
+    uint16_t    endgid;
+    uint64_t    nguid[2];
+    uint64_t    eui64;
+    NvmeKVF     kvf[16];
+    uint8_t     rsvd328[3512];
+    uint8_t     vs[256];
+} NvmeIdNsKV;
 
 /*Deallocate Logical Block Features*/
 #define NVME_ID_NS_DLFEAT_GUARD_CRC(dlfeat)       ((dlfeat) & 0x10)
@@ -1850,6 +1917,7 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeCopySourceRangeFormat0) != 32);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCopySourceRangeFormat1) != 40);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCmd) != 64);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeKVCmd) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDeleteQ) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCreateCq) != 64);
     QEMU_BUILD_BUG_ON(sizeof(NvmeCreateSq) != 64);
@@ -1872,6 +1940,8 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsIndependent) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsNvm) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsZoned) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsKV) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeKVF) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeSglDescriptor) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNsDescr) != 4);
     QEMU_BUILD_BUG_ON(sizeof(NvmeZoneDescr) != 64);
