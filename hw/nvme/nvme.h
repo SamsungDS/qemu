@@ -126,6 +126,8 @@ typedef struct NvmeNamespaceParams {
     uint32_t numzrwa;
     uint64_t zrwas;
     uint64_t zrwafg;
+
+    bool     perm_wr_protect;
 } NvmeNamespaceParams;
 
 typedef struct NvmeNamespace {
@@ -172,6 +174,8 @@ typedef struct NvmeNamespace {
     struct {
         uint32_t err_rec;
     } features;
+
+    uint8_t nwps;
 } NvmeNamespace;
 
 static inline uint32_t nvme_nsid(NvmeNamespace *ns)

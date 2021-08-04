@@ -873,6 +873,7 @@ enum NvmeStatusCodes {
     NVME_SGL_DESCR_TYPE_INVALID = 0x0011,
     NVME_INVALID_USE_OF_CMB     = 0x0012,
     NVME_INVALID_PRP_OFFSET     = 0x0013,
+    NVME_NS_WRITE_PROT          = 0x0020,
     NVME_CMD_SET_CMB_REJECTED   = 0x002b,
     NVME_INVALID_CMD_SET        = 0x002c,
     NVME_LBA_RANGE              = 0x0080,
@@ -1103,7 +1104,7 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint16_t    awun;
     uint16_t    awupf;
     uint8_t     nvscc;
-    uint8_t     rsvd531;
+    uint8_t     nwpc;
     uint16_t    acwu;
     uint16_t    ocfs;
     uint32_t    sgls;
@@ -1247,6 +1248,7 @@ enum NvmeFeatureIds {
     NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
     NVME_COMMAND_SET_PROFILE        = 0x19,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
+    NVME_NS_WRITE_PROTECTION        = 0x84,
     NVME_FID_MAX                    = 0x100,
 };
 
@@ -1338,7 +1340,9 @@ typedef struct QEMU_PACKED NvmeIdNs {
     uint16_t    mssrl;
     uint32_t    mcl;
     uint8_t     msrc;
-    uint8_t     rsvd81[23];
+    uint8_t     rsvd81[18];
+    uint8_t     nsattr;
+    uint8_t     rsvd100[4];
     uint8_t     nguid[16];
     uint64_t    eui64;
     NvmeLBAF    lbaf[NVME_MAX_NLBAF];
@@ -1616,6 +1620,18 @@ typedef enum NvmeVirtualResourceType {
     NVME_VIRT_RES_QUEUE         = 0x00,
     NVME_VIRT_RES_INTERRUPT     = 0x01,
 } NvmeVirtualResourceType;
+
+enum NvmeNsWriteProtect {
+    NVME_NS_WR_PROTECT                      = 0x01,
+    NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE       = 0x02,
+    NVME_NS_PERM_WR_PROTECT                 = 0x03,
+};
+
+enum NvmeNsWriteProtectMask {
+    NVME_NS_WR_PROTECT_MASK                    = 1 << 0,
+    NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE_MASK     = 1 << 1,
+    NVME_NS_PERM_WR_PROTECT_MASK               = 1 << 2,
+};
 
 static inline void _nvme_check_size(void)
 {

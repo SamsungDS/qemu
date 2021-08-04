@@ -1740,7 +1740,22 @@ SRST
   When there is no preceding snapshot or the execution is not replayed,
   then the command fails.
   *icount* for the reference may be observed with ``info replay`` command.
+
 ERST
+
+    {
+        .name       = "hmp_nvme_issue_power_cycle",
+        .args_type  = "id:s",
+        .params     = "id",
+        .help       = "issue power cycle",
+        .cmd        = hmp_nvme_issue_power_cycle,
+    },
+
+SRST
+``hmp_nvme_issue_power_cycle``
+  Issue power cycle to nvme device
+ERST
+
 
     {
         .name       = "info",

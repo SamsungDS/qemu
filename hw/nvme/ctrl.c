@@ -197,6 +197,8 @@
 #include "hw/pci/msix.h"
 #include "hw/pci/pcie_sriov.h"
 #include "migration/vmstate.h"
+#include "qapi/qmp/qdict.h"
+#include "monitor/hmp.h"
 
 #include "nvme.h"
 #include "dif.h"
@@ -237,6 +239,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = true,
     [NVME_TIMESTAMP]                = true,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
+    [NVME_NS_WRITE_PROTECTION]      = true,
     [NVME_COMMAND_SET_PROFILE]      = true,
 };
 
@@ -247,6 +250,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_NUMBER_OF_QUEUES]         = NVME_FEAT_CAP_CHANGE,
     [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
     [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
+    [NVME_NS_WRITE_PROTECTION]      = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
     [NVME_COMMAND_SET_PROFILE]      = NVME_FEAT_CAP_CHANGE,
 };
@@ -2460,6 +2464,10 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeRequest *req)
     uint32_t nr = (le32_to_cpu(dsm->nr) & 0xff) + 1;
     uint16_t status = NVME_SUCCESS;
 
+    if (ns->id_ns.nsattr & 0x1) {
+        return NVME_NS_WRITE_PROT | NVME_DNR;
+    }
+
     trace_pci_nvme_dsm(nr, attr);
 
     if (attr & NVME_DSMGMT_AD) {
@@ -3361,6 +3369,10 @@ static uint16_t nvme_do_write(NvmeCtrl *n, NvmeRequest *req, bool append,
     NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
     BlockBackend *blk = ns->blkconf.blk;
     uint16_t status;
+
+    if ((ns->id_ns.nsattr & 0x1) == 1) {
+        return NVME_NS_WRITE_PROT | NVME_DNR;
+    }
 
     if (nvme_ns_ext(ns)) {
         mapped_size += nvme_m2b(ns, nlb);
@@ -5364,6 +5376,14 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
     case NVME_HOST_BEHAVIOR_SUPPORT:
         return nvme_c2h(n, (uint8_t *)&n->features.hbs,
                         sizeof(n->features.hbs), req);
+    case NVME_NS_WRITE_PROTECTION:
+        ns = nvme_ns(n, nsid);
+        if (!nvme_nsid_valid(n, nsid)) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+
+        result = cpu_to_le32(ns->nwps);
+        goto out;
     default:
         break;
     }
@@ -5433,6 +5453,7 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
     uint8_t fid = NVME_GETSETFEAT_FID(dw10);
     uint8_t save = NVME_SETFEAT_SAVE(dw10);
     uint16_t status;
+    uint8_t nwps_local;
     int i;
 
     trace_pci_nvme_setfeat(nvme_cid(req), nsid, fid, save, dw11);
@@ -5587,6 +5608,37 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
             trace_pci_nvme_err_invalid_iocsci(dw11 & 0x1ff);
             return NVME_CMD_SET_CMB_REJECTED | NVME_DNR;
         }
+        break;
+    case NVME_NS_WRITE_PROTECTION:
+        ns = nvme_ns(n, nsid);
+        if (!nvme_nsid_valid(n, nsid)) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+
+        nwps_local = dw11 & 0x3;
+
+        if (((n->id_ctrl.nwpc & NVME_NS_WR_PROTECT_MASK) == 0 &&
+             nwps_local == NVME_NS_WR_PROTECT) ||
+            ((n->id_ctrl.nwpc & NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE_MASK)  == 0 &&
+             nwps_local == NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE) ||
+            ((n->id_ctrl.nwpc & NVME_NS_PERM_WR_PROTECT_MASK)  == 0 &&
+             nwps_local == NVME_NS_PERM_WR_PROTECT) ||
+            (nwps_local > NVME_NS_PERM_WR_PROTECT)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (ns->nwps == NVME_NS_PERM_WR_PROTECT &&
+            nwps_local < NVME_NS_PERM_WR_PROTECT) {
+            return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
+        }
+
+        if (ns->nwps == NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE &&
+            nwps_local < NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE) {
+            return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
+        }
+
+        ns->id_ns.nsattr = nwps_local > 0 ? 1 : 0;
+        ns->nwps = nwps_local;
+
         break;
     default:
         return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
@@ -7560,6 +7612,9 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     if (pci_is_vf(&n->parent_obj) && !sctrl->scs) {
         stl_le_p(&n->bar.csts, NVME_CSTS_FAILED);
     }
+
+    /* Initialize the Namespace Write Protecting capabilities */
+    id->nwpc = NVME_NS_WR_PROTECT_MASK | NVME_NS_PERM_WR_PROTECT_MASK;
 }
 
 static int nvme_init_subsys(NvmeCtrl *n, Error **errp)
@@ -7590,6 +7645,40 @@ void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns)
 
     n->dmrsl = MIN_NON_ZERO(n->dmrsl,
                             BDRV_REQUEST_MAX_BYTES / nvme_l2b(ns, 1));
+}
+
+static void nvme_power_cycle(NvmeCtrl *n)
+{
+    for (uint32_t cntlid = 0; cntlid < ARRAY_SIZE(n->subsys->ctrls); cntlid++) {
+        NvmeCtrl *ctrl = nvme_subsys_ctrl(n->subsys, cntlid);
+        if (!ctrl) {
+            continue;
+        }
+        for (int nsid = 1; nsid <= NVME_MAX_NAMESPACES; nsid++) {
+            NvmeNamespace *ns = nvme_ns(ctrl, nsid);
+            if (!ns) {
+                continue;
+            }
+            if (ns->nwps == NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE) {
+                ns->nwps = 0;
+                ns->id_ns.nsattr = 0;
+            }
+        }
+    }
+}
+
+void hmp_nvme_issue_power_cycle(Monitor *mon, const QDict *qdict)
+{
+    const char *id = qdict_get_str(qdict, "id");
+    NvmeCtrl *n;
+    DeviceState *dev;
+
+    dev = qdev_find_recursive(sysbus_get_default(), id);
+    if (!dev) {
+        return;
+    }
+    n = NVME(dev);
+    nvme_power_cycle(n);
 }
 
 static void nvme_realize(PCIDevice *pci_dev, Error **errp)

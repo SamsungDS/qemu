@@ -102,6 +102,11 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
     if (ns->params.pi && ns->params.pil) {
         id_ns->dps |= NVME_ID_NS_DPS_FIRST_EIGHT;
     }
+    /* update the namespace write protect state */
+    if (ns->params.perm_wr_protect) {
+        ns->nwps = NVME_NS_PERM_WR_PROTECT;
+        id_ns->nsattr = 1;
+    }
 
     ns->pif = ns->params.pif;
 
@@ -644,6 +649,8 @@ static Property nvme_ns_props[] = {
     DEFINE_PROP_SIZE("zoned.zrwafg", NvmeNamespace, params.zrwafg, -1),
     DEFINE_PROP_BOOL("eui64-default", NvmeNamespace, params.eui64_default,
                      false),
+    DEFINE_PROP_BOOL("perm_wr_protect", NvmeNamespace,
+                      params.perm_wr_protect, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
