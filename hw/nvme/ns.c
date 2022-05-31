@@ -606,6 +606,8 @@ static void nvme_ns_realize(DeviceState *dev, Error **errp)
 
             return;
         }
+
+        ns->id_ns.endgid = cpu_to_le16(0x1);
     }
 
     nvme_attach_ns(n, ns);
