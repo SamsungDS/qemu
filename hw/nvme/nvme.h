@@ -27,6 +27,7 @@
 #define NVME_MAX_CONTROLLERS 256
 #define NVME_MAX_NAMESPACES  256
 #define NVME_EUI64_DEFAULT ((uint64_t)0x5254000000000000)
+#define NVME_FDP_MAX_EVENTS 63
 
 QEMU_BUILD_BUG_ON(NVME_MAX_NAMESPACES > NVME_NSID_BROADCAST - 1);
 
@@ -100,6 +101,30 @@ typedef struct NvmeZone {
     QTAILQ_ENTRY(NvmeZone) entry;
 } NvmeZone;
 
+#define FDP_EVT_MAX 0xff
+#define NVME_FDP_MAX_NS_RUHS 32u
+#define FDPVSS 0
+
+static const uint8_t nvme_fdp_evf_shifts[FDP_EVT_MAX] = {
+    /* Host events */
+    [FDP_EVT_RU_NOT_FULLY_WRITTEN]      = 0,
+    [FDP_EVT_RU_ATL_EXCEEDED]           = 1,
+    [FDP_EVT_CTRL_RESET_RUH]            = 2,
+    [FDP_EVT_INVALID_PID]               = 3,
+    /* CTRL events */
+    [FDP_EVT_MEDIA_REALLOC]             = 32,
+    [FDP_EVT_RUH_IMPLICIT_RU_CHANGE]    = 33,
+};
+
+typedef struct NvmeRuHandle {
+    uint16_t rgid;
+    uint16_t ruhid;
+    uint8_t  type;
+    uint64_t nlb_ruamw;
+    uint64_t nlb_deallocated;
+    uint64_t event_filter;
+} NvmeRuHandle;
+
 typedef struct NvmeNamespaceParams {
     bool     detached;
     bool     shared;
@@ -129,7 +154,19 @@ typedef struct NvmeNamespaceParams {
     uint32_t numzrwa;
     uint64_t zrwas;
     uint64_t zrwafg;
+
+    bool     fdp;
+    uint64_t ru_size_bs;
+    uint8_t  nruhrg;
+    uint16_t nrg;
 } NvmeNamespaceParams;
+
+typedef struct NvmeFdpEventBuffer {
+    NvmeFdpEvent     events[NVME_FDP_MAX_EVENTS];
+    unsigned int     nelems;
+    unsigned int     start;
+    unsigned int     next;
+} NvmeFdpEventBuffer;
 
 typedef struct NvmeNamespace {
     DeviceState  parent_obj;
@@ -175,6 +212,20 @@ typedef struct NvmeNamespace {
     struct {
         uint32_t err_rec;
     } features;
+
+    struct {
+        NvmeFdpEventBuffer   host_events;
+        NvmeFdpEventBuffer   ctrl_events;
+        uint64_t             ru_nlba;
+        uint8_t              nruhrg;
+        uint16_t             nrg;
+        NvmeRuHandle         *ruhs;
+        uint8_t              rgif;
+        uint64_t             hbmw;
+        uint64_t             mbmw;
+        uint64_t             mbe;
+        bool                 enabled;
+    } fdp;
 } NvmeNamespace;
 
 static inline uint32_t nvme_nsid(NvmeNamespace *ns)
@@ -276,6 +327,12 @@ static inline void nvme_aor_dec_active(NvmeNamespace *ns)
         assert(ns->nr_active_zones >= ns->nr_open_zones);
     }
     assert(ns->nr_active_zones >= 0);
+}
+
+static inline void nvme_fdp_stat_inc(uint64_t *a, uint64_t b)
+{
+    uint64_t ret = *a + b;
+    *a = ret < *a ? UINT64_MAX : ret;
 }
 
 void nvme_ns_init_format(NvmeNamespace *ns);
@@ -579,6 +636,81 @@ static inline NvmeSecCtrlEntry *nvme_sctrl_for_cntlid(NvmeCtrl *n,
     }
 
     return NULL;
+}
+
+static inline uint16_t nvme_phid_to_ruhid(NvmeNamespace *ns, uint16_t phid)
+{
+    /* for now, PHID == RUHID */
+    return phid;
+}
+
+static inline uint16_t nvme_ruhid_to_phid(NvmeNamespace *ns, uint16_t ruhid)
+{
+    /* for now, PHID == RUHID */
+    return ruhid;
+}
+
+static inline uint16_t nvme_pid_phid(NvmeNamespace *ns, uint16_t pid)
+{
+    if (unlikely(ns->fdp.rgif == 0)) {
+        return pid;  /* PIDRG_NORGI */
+    }
+    return pid & ((1 << (15 - ns->fdp.rgif)) - 1);
+}
+
+static inline uint16_t nvme_pid_rgid(NvmeNamespace *ns, uint16_t pid)
+{
+    if (unlikely(ns->fdp.rgif == 0)) {
+        /* there can only be 1 RGID in this scenario, and its ID will be 0 */
+        return 0;
+    }
+    return pid >> (16 - ns->fdp.rgif);
+}
+
+static inline uint16_t nvme_ruh_pid(NvmeNamespace *ns, uint16_t rgid,
+                                    uint16_t phid)
+{
+    return nvme_pid_phid(ns, phid) | (rgid << (16 - ns->fdp.rgif));
+}
+
+static inline unsigned int nvme_fdp_ruhs_offset(NvmeNamespace *ns, uint16_t pid)
+{
+    return nvme_pid_rgid(ns, pid) * ns->fdp.nruhrg
+        + nvme_pid_phid(ns, pid);
+}
+
+static inline uint16_t determine_rgif(uint16_t nruhrg, uint16_t nrg,
+                                      uint8_t *rgif)
+{
+    uint16_t val;
+    unsigned int i;
+
+    if (unlikely(nrg == 1)) {
+        /* PIDRG_NORGI scenario, all of pid is used for PHID */
+        *rgif = 0;
+        return 0;
+    }
+
+    val = nrg;
+    i = 0;
+    while (val) {
+        val >>= 1;
+        i++;
+    }
+    *rgif = i;
+
+    /* ensure remaining bits suffice to represent number of phids in a RG */
+    if (unlikely((UINT16_MAX >> i) < nruhrg)) {
+        *rgif = 0;
+        return -1;
+    }
+
+    return 0;
+}
+
+static inline uint16_t nvme_fdp_num_ruhs(NvmeNamespace *ns)
+{
+    return ns->fdp.enabled ? ns->fdp.nruhrg * ns->fdp.nrg : 0;
 }
 
 void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns);

@@ -16,6 +16,7 @@
 #include "qemu/units.h"
 #include "qemu/error-report.h"
 #include "qapi/error.h"
+#include "qemu/bitops.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/block-backend.h"
 
@@ -24,6 +25,7 @@
 
 #define MIN_DISCARD_GRANULARITY (4 * KiB)
 #define NVME_DEFAULT_ZONE_SIZE   (128 * MiB)
+#define NVME_DEFAULT_RU_SIZE (96 * MiB)
 
 void nvme_ns_init_format(NvmeNamespace *ns)
 {
@@ -377,6 +379,105 @@ static void nvme_zoned_ns_shutdown(NvmeNamespace *ns)
     assert(ns->nr_open_zones == 0);
 }
 
+static int nvme_ns_fdp_check_calc_geometry(NvmeNamespace *ns, Error **errp)
+{
+    uint64_t ru_size;
+    uint64_t nru;
+    uint8_t nruhrg;
+    uint16_t nrg;
+    uint32_t nruh;
+    unsigned long nrg_nbits;
+    uint16_t nruhrg_max;
+    uint8_t rgif;
+    int err;
+
+    ru_size = ns->params.ru_size_bs;
+    ns->fdp.ru_nlba = ru_size / ns->lbasz;
+    nru = le64_to_cpu(ns->id_ns.nsze) / ns->fdp.ru_nlba;
+
+    if (nru <= 1) {
+        error_setg(errp, "reclaim unit size too large or drive capacity too "
+                "small, must have at least 2 reclaim units");
+        return -1;
+    }
+
+    nrg = ns->fdp.nrg = ns->params.nrg;
+    if (nrg == 0) {
+        error_setg(errp, "nrg must be 1 or more");
+        return -1;
+    }
+
+    nrg_nbits = nrg;
+    nrg_nbits = find_last_bit(&nrg_nbits, sizeof(uint16_t));
+    nruhrg_max = (1 << (16 - nrg_nbits)) - 1;
+
+    if (ns->params.nruhrg) {
+        nruhrg = ns->params.nruhrg;
+    } else if (nrg != 1) {
+        nruhrg = MIN(nru / nrg, NVME_FDP_MAX_NS_RUHS);
+    } else {
+        nruhrg = MIN(nru - 1, NVME_FDP_MAX_NS_RUHS);
+    }
+    ns->fdp.nruhrg = nruhrg;
+
+    if (nruhrg > NVME_FDP_MAX_NS_RUHS) {
+        error_setg(errp, "number of reclaim unit handles (%"PRIu8") "
+                "exceed spec max (%u)", nruhrg, NVME_FDP_MAX_NS_RUHS);
+        return -1;
+    } else if (nruhrg > nruhrg_max) {
+        error_setg(errp, "NRUHRG too high for number of RG's. "
+                   "nruhrg=%"PRIu8", nruhrg_max=%ul", nruhrg, nruhrg_max);
+        return -1;
+    }
+
+    nruh = nruhrg * nrg;
+    if (nruh >= nru) {
+        error_setg(errp, "number of reclaim unit handles (%"PRIu32") "
+                "exceed the number of reclaim units (%"PRIu64")", nruh, nru);
+        return -1;
+    }
+
+    err = determine_rgif(ns->fdp.nruhrg, ns->fdp.nrg, &rgif);
+    if (err) {
+        error_setg(errp, "cannot derive a valid RGIF, NRUH=%"PRIu32", NRG=%"
+                PRIu16"\n", nruh, nrg);
+        return -1;
+    }
+    ns->fdp.rgif = rgif;
+
+    trace_pci_nvme_fdp_init(nru, ru_size, nrg, nruhrg);
+
+    return 0;
+}
+
+static void nvme_ns_fdp_init(NvmeNamespace *ns)
+{
+    NvmeRuHandle *ruh;
+    uint16_t nruh = ns->fdp.nruhrg * ns->fdp.nrg;
+
+    ns->fdp.ruhs = g_new0(NvmeRuHandle, nruh);
+    ruh = ns->fdp.ruhs;
+
+    for (uint16_t rgid = 0; rgid < ns->fdp.nrg; rgid++) {
+        for (uint16_t ruhid = 0; ruhid < ns->fdp.nruhrg; ruhid++) {
+            ruh->rgid = rgid;
+            ruh->ruhid = ruhid;
+            ruh->type = RUHT_INITIALLY_ISOLATED;
+            ruh->nlb_ruamw = ns->fdp.ru_nlba;
+            ruh++;
+        }
+    }
+
+    memset(&ns->fdp.host_events, 0, sizeof(NvmeFdpEventBuffer));
+    memset(&ns->fdp.ctrl_events, 0, sizeof(NvmeFdpEventBuffer));
+
+    ns->fdp.hbmw = 0;
+    ns->fdp.mbmw = 0;
+    ns->fdp.mbe = 0;
+
+    ns->fdp.enabled = true;
+}
+
 static int nvme_ns_check_constraints(NvmeNamespace *ns, Error **errp)
 {
     unsigned int pi_size;
@@ -414,6 +515,11 @@ static int nvme_ns_check_constraints(NvmeNamespace *ns, Error **errp)
     if (ns->params.nsid > NVME_MAX_NAMESPACES) {
         error_setg(errp, "invalid namespace id (must be between 0 and %d)",
                    NVME_MAX_NAMESPACES);
+        return -1;
+    }
+
+    if (ns->params.zoned && ns->params.fdp) {
+        error_setg(errp, "cannot be a zoned- and also a FDP NS");
         return -1;
     }
 
@@ -502,6 +608,13 @@ int nvme_ns_setup(NvmeNamespace *ns, Error **errp)
         nvme_ns_init_zoned(ns);
     }
 
+    if (ns->params.fdp) {
+        if (nvme_ns_fdp_check_calc_geometry(ns, errp) != 0) {
+            return -1;
+        }
+        nvme_ns_fdp_init(ns);
+    }
+
     return 0;
 }
 
@@ -524,6 +637,9 @@ void nvme_ns_cleanup(NvmeNamespace *ns)
         g_free(ns->id_ns_zoned);
         g_free(ns->zone_array);
         g_free(ns->zd_extensions);
+    }
+    if (ns->fdp.enabled) {
+        g_free(ns->fdp.ruhs);
     }
 }
 
@@ -646,6 +762,11 @@ static Property nvme_ns_props[] = {
     DEFINE_PROP_SIZE("zoned.zrwafg", NvmeNamespace, params.zrwafg, -1),
     DEFINE_PROP_BOOL("eui64-default", NvmeNamespace, params.eui64_default,
                      false),
+    DEFINE_PROP_BOOL("fdp", NvmeNamespace, params.fdp, false),
+    DEFINE_PROP_SIZE("fdp.ru_size", NvmeNamespace, params.ru_size_bs,
+                     NVME_DEFAULT_RU_SIZE),
+    DEFINE_PROP_UINT8("fdp.nruhrg", NvmeNamespace, params.nruhrg, 0),
+    DEFINE_PROP_UINT16("fdp.nrg", NvmeNamespace, params.nrg, 1),
     DEFINE_PROP_END_OF_LIST(),
 };
 
