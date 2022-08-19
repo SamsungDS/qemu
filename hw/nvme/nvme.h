@@ -429,6 +429,18 @@ typedef struct NvmeParams {
     uint8_t  sriov_max_vi_per_vf;
 } NvmeParams;
 
+typedef struct NvmeDst {
+    uint8_t      current_dsto;
+    uint8_t      current_dstc;
+    uint8_t      num_entries;
+    QTAILQ_HEAD(, NvmeDstEntry)  dst_list;
+} NvmeDst;
+
+typedef struct NvmeDstEntry {
+    NvmeSelfTestResult           dst_entry;
+    QTAILQ_ENTRY(NvmeDstEntry)   entry;
+} NvmeDstEntry;
+
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;
     MemoryRegion bar0;
@@ -502,6 +514,8 @@ typedef struct NvmeCtrl {
         uint32_t                async_config;
         NvmeHostBehaviorSupport hbs;
     } features;
+
+	NvmeDst dst;
 
     NvmePriCtrlCap  pri_ctrl_cap;
     NvmeSecCtrlList sec_ctrl_list;
