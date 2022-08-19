@@ -251,7 +251,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_COMMAND_SET_PROFILE]      = NVME_FEAT_CAP_CHANGE,
 };
 
-static const uint32_t nvme_cse_acs[256] = {
+static const uint32_t nvme_cse_acs[NVME_MAX_COMMANDS] = {
     [NVME_ADM_CMD_DELETE_SQ]        = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_CREATE_SQ]        = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_GET_LOG_PAGE]     = NVME_CMD_EFF_CSUPP,
@@ -268,32 +268,7 @@ static const uint32_t nvme_cse_acs[256] = {
     [NVME_ADM_CMD_FORMAT_NVM]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
 };
 
-static const uint32_t nvme_cse_iocs_none[256];
-
-static const uint32_t nvme_cse_iocs_nvm[256] = {
-    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE_ZEROES]         = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_DSM]                  = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_VERIFY]               = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_COPY]                 = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_COMPARE]              = NVME_CMD_EFF_CSUPP,
-};
-
-static const uint32_t nvme_cse_iocs_zoned[256] = {
-    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE_ZEROES]         = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_DSM]                  = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_VERIFY]               = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_COPY]                 = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_COMPARE]              = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_ZONE_APPEND]          = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_ZONE_MGMT_SEND]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_ZONE_MGMT_RECV]       = NVME_CMD_EFF_CSUPP,
-};
+static const uint32_t nvme_cse_iocs_none[NVME_MAX_COMMANDS];
 
 static void nvme_process_sq(void *opaque);
 static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst);
@@ -4614,17 +4589,17 @@ static uint16_t nvme_cmd_effects(NvmeCtrl *n, uint8_t csi, uint32_t buf_len,
 
     switch (NVME_CC_CSS(ldl_le_p(&n->bar.cc))) {
     case NVME_CC_CSS_NVM:
-        src_iocs = nvme_cse_iocs_nvm;
+        src_iocs = n->iocs.nvm;
         /* fall through */
     case NVME_CC_CSS_ADMIN_ONLY:
         break;
     case NVME_CC_CSS_CSI:
         switch (csi) {
         case NVME_CSI_NVM:
-            src_iocs = nvme_cse_iocs_nvm;
+            src_iocs = n->iocs.nvm;
             break;
         case NVME_CSI_ZONED:
-            src_iocs = nvme_cse_iocs_zoned;
+            src_iocs = n->iocs.zoned;
             break;
         }
     }
@@ -5296,6 +5271,10 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
+    if (!(le16_to_cpu(n->id_ctrl.oncs) & NVME_ONCS_FEATURES) && sel) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
     if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
         if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
             /*
@@ -5378,6 +5357,9 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
         result = n->features.async_config;
         goto out;
     case NVME_TIMESTAMP:
+        if (!(le16_to_cpu(n->id_ctrl.oncs) & NVME_ONCS_TIMESTAMP)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         return nvme_get_feature_timestamp(n, req);
     case NVME_HOST_BEHAVIOR_SUPPORT:
         return nvme_c2h(n, (uint8_t *)&n->features.hbs,
@@ -5457,6 +5439,10 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
 
     if (save && !(nvme_feature_cap[fid] & NVME_FEAT_CAP_SAVE)) {
         return NVME_FID_NOT_SAVEABLE | NVME_DNR;
+    }
+
+    if (!(le16_to_cpu(n->id_ctrl.oncs) & NVME_ONCS_FEATURES) && save) {
+        return NVME_INVALID_FIELD | NVME_DNR;
     }
 
     if (!nvme_feature_support[fid]) {
@@ -5571,6 +5557,9 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
         n->features.async_config = dw11;
         break;
     case NVME_TIMESTAMP:
+        if (!(le16_to_cpu(n->id_ctrl.oncs) & NVME_ONCS_TIMESTAMP)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
         return nvme_set_feature_timestamp(n, req);
     case NVME_HOST_BEHAVIOR_SUPPORT:
         status = nvme_h2c(n, (uint8_t *)&n->features.hbs,
@@ -5647,14 +5636,14 @@ static void nvme_select_iocs_ns(NvmeCtrl *n, NvmeNamespace *ns)
     switch (ns->csi) {
     case NVME_CSI_NVM:
         if (NVME_CC_CSS(cc) != NVME_CC_CSS_ADMIN_ONLY) {
-            ns->iocs = nvme_cse_iocs_nvm;
+            ns->iocs = n->iocs.nvm;
         }
         break;
     case NVME_CSI_ZONED:
         if (NVME_CC_CSS(cc) == NVME_CC_CSS_CSI) {
-            ns->iocs = nvme_cse_iocs_zoned;
+            ns->iocs = n->iocs.zoned;
         } else if (NVME_CC_CSS(cc) == NVME_CC_CSS_NVM) {
-            ns->iocs = nvme_cse_iocs_nvm;
+            ns->iocs = n->iocs.nvm;
         }
         break;
     }
@@ -7174,6 +7163,44 @@ static void nvme_check_constraints(NvmeCtrl *n, Error **errp)
     }
 }
 
+static void nvme_init_cse_iocs(NvmeCtrl *n)
+{
+    uint16_t oncs = n->params.oncs;
+
+    n->iocs.nvm[NVME_CMD_FLUSH] = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC;
+    n->iocs.nvm[NVME_CMD_WRITE] = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC;
+    n->iocs.nvm[NVME_CMD_READ]  = NVME_CMD_EFF_CSUPP;
+
+    if (oncs & NVME_ONCS_WRITE_ZEROES) {
+        n->iocs.nvm[NVME_CMD_WRITE_ZEROES] = NVME_CMD_EFF_CSUPP |
+            NVME_CMD_EFF_LBCC;
+    }
+
+    if (oncs & NVME_ONCS_COMPARE) {
+        n->iocs.nvm[NVME_CMD_COMPARE] = NVME_CMD_EFF_CSUPP;
+    }
+
+    if (oncs & NVME_ONCS_DSM) {
+        n->iocs.nvm[NVME_CMD_DSM] = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC;
+    }
+
+    if (oncs & NVME_ONCS_COPY) {
+        n->iocs.nvm[NVME_CMD_COPY] = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC;
+    }
+
+    if (oncs & NVME_ONCS_VERIFY) {
+        n->iocs.nvm[NVME_ONCS_VERIFY] = NVME_CMD_EFF_CSUPP;
+    }
+
+    memcpy(n->iocs.zoned,  n->iocs.nvm, sizeof(n->iocs.nvm));
+
+    n->iocs.zoned[NVME_CMD_ZONE_APPEND] = NVME_CMD_EFF_CSUPP |
+        NVME_CMD_EFF_LBCC;
+    n->iocs.zoned[NVME_CMD_ZONE_MGMT_SEND] = NVME_CMD_EFF_CSUPP |
+        NVME_CMD_EFF_LBCC;
+    n->iocs.zoned[NVME_CMD_ZONE_MGMT_RECV] = NVME_CMD_EFF_CSUPP;
+}
+
 static void nvme_init_state(NvmeCtrl *n)
 {
     NvmePriCtrlCap *cap = &n->pri_ctrl_cap;
@@ -7200,6 +7227,8 @@ static void nvme_init_state(NvmeCtrl *n)
     n->starttime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     n->aer_reqs = g_new0(NvmeRequest *, n->params.aerl + 1);
     QTAILQ_INIT(&n->aer_queue);
+
+	nvme_init_cse_iocs(n);
 
     list->numcntl = cpu_to_le16(max_vfs);
     for (i = 0; i < max_vfs; i++) {
@@ -7491,9 +7520,6 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->sqes = (0x6 << 4) | 0x6;
     id->cqes = (0x4 << 4) | 0x4;
     id->nn = cpu_to_le32(NVME_MAX_NAMESPACES);
-    id->oncs = cpu_to_le16(NVME_ONCS_WRITE_ZEROES | NVME_ONCS_TIMESTAMP |
-                           NVME_ONCS_FEATURES | NVME_ONCS_DSM |
-                           NVME_ONCS_COMPARE | NVME_ONCS_COPY);
 
     /*
      * NOTE: If this device ever supports a command set that does NOT use 0x0
@@ -7671,6 +7697,10 @@ static Property nvme_props[] = {
     DEFINE_PROP_BOOL("use-intel-id", NvmeCtrl, params.use_intel_id, false),
     DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.legacy_cmb, false),
     DEFINE_PROP_BOOL("ioeventfd", NvmeCtrl, params.ioeventfd, false),
+	DEFINE_PROP_UINT16("oncs", NvmeCtrl, params.oncs, NVME_ONCS_WRITE_ZEROES |
+                           NVME_ONCS_TIMESTAMP | NVME_ONCS_DSM |
+                           NVME_ONCS_COMPARE | NVME_ONCS_FEATURES |
+                           NVME_ONCS_COPY | NVME_ONCS_VERIFY),
     DEFINE_PROP_UINT8("zoned.zasl", NvmeCtrl, params.zasl, 0),
     DEFINE_PROP_BOOL("zoned.auto_transition", NvmeCtrl,
                      params.auto_transition_zones, true),

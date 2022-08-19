@@ -27,6 +27,7 @@
 #define NVME_MAX_CONTROLLERS 256
 #define NVME_MAX_NAMESPACES  256
 #define NVME_EUI64_DEFAULT ((uint64_t)0x5254000000000000)
+#define NVME_MAX_COMMANDS 0x100
 
 QEMU_BUILD_BUG_ON(NVME_MAX_NAMESPACES > NVME_NSID_BROADCAST - 1);
 
@@ -421,6 +422,7 @@ typedef struct NvmeParams {
     uint8_t  zasl;
     bool     auto_transition_zones;
     bool     legacy_cmb;
+    uint16_t oncs;
     bool     ioeventfd;
     uint8_t  sriov_max_vfs;
     uint16_t sriov_vq_flexible;
@@ -502,6 +504,11 @@ typedef struct NvmeCtrl {
         uint32_t                async_config;
         NvmeHostBehaviorSupport hbs;
     } features;
+
+    struct {
+        uint32_t nvm[NVME_MAX_COMMANDS];
+        uint32_t zoned[NVME_MAX_COMMANDS];
+    } iocs;
 
     NvmePriCtrlCap  pri_ctrl_cap;
     NvmeSecCtrlList sec_ctrl_list;
