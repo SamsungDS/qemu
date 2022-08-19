@@ -578,6 +578,74 @@ typedef struct QEMU_PACKED NvmeCmd {
     uint32_t    cdw15;
 } NvmeCmd;
 
+typedef struct QEMU_PACKED NvmeReservationRegister {
+    uint64_t crkey;
+    uint64_t nrkey;
+} NvmeReservationRegister;
+
+typedef struct QEMU_PACKED NvmeReservationAcquire {
+    uint64_t crkey;
+    uint64_t prkey;
+} NvmeReservationAcquire;
+
+enum NvmeReservationType {
+    WRITE_EXCLUSIVE                     = 0x1,
+    EXCLUSIVE_ACCESS                    = 0x2,
+    WRITE_EXCLUSIVE_REGISTRANTS         = 0x3,
+    EXCLUSIVE_ACCESS_REGISTRANTS        = 0x4,
+    WRITE_EXCLUSIVE_ALL_REGISTRANTS     = 0x5,
+    EXCLUSIVE_ACCESS_ALL_REGISTRANTS    = 0x6,
+};
+
+typedef struct QEMU_PACKED NvmeReservationStatus {
+    uint32_t gen;
+    uint8_t  rtype;
+    uint16_t regctl;
+    uint8_t  rsvd7[2];
+    uint8_t  ptpls;
+    uint8_t  rsvd10[14];
+} NvmeReservationStatus;
+
+typedef struct NvmeRegisteredControllerData {
+    uint16_t cntlid;
+    uint8_t  rcsts;
+    uint8_t  rsvd3[5];
+    uint64_t hostid;
+    uint64_t rkey;
+} NvmeRegisteredControllerData;
+
+typedef struct NvmeReservationStatusReport {
+    NvmeReservationStatus        res_status;
+    NvmeRegisteredControllerData res_ctl_struct[32];
+} NvmeReservationStatusReport;
+
+typedef struct NvmeResvNotifLog {
+    uint64_t log_page_count;
+    uint8_t  resv_notif_log_type;
+    uint8_t  num_available_log_pages;
+    uint8_t  rsvd10[2];
+    uint32_t nsid;
+    uint8_t  rsvd16[48];
+} NvmeResvNotifLog;
+
+typedef struct NvmeResvNotification {
+    uint8_t resv0;
+    uint8_t regpre;
+    uint8_t resrel;
+    uint8_t respre;
+    uint16_t resv4;
+    uint16_t resv5;
+} NvmeResvNotification;
+
+typedef struct QEMU_PACKED NvmeReservationLogPage {
+    uint64_t log_page_count;
+    uint8_t  rsv_log_page_type;
+    uint8_t  num_available_log_pages;
+    uint8_t  rsvd10[2];
+    uint32_t nsid;
+    uint8_t  rsvd16[48];
+} NvmeReservationLogPage;
+
 #define NVME_CMD_FLAGS_FUSE(flags) (flags & 0x3)
 #define NVME_CMD_FLAGS_PSDT(flags) ((flags >> 6) & 0x3)
 
@@ -611,6 +679,10 @@ enum NvmeIoCommands {
     NVME_CMD_WRITE_ZEROES       = 0x08,
     NVME_CMD_DSM                = 0x09,
     NVME_CMD_VERIFY             = 0x0c,
+    NVME_CMD_RSV_REGISTER       = 0x0D,
+    NVME_CMD_RSV_REPORT         = 0x0E,
+    NVME_CMD_RSV_ACQUIRE        = 0x11,
+    NVME_CMD_RSV_RELEASE        = 0x15,
     NVME_CMD_COPY               = 0x19,
     NVME_CMD_ZONE_MGMT_SEND     = 0x79,
     NVME_CMD_ZONE_MGMT_RECV     = 0x7a,
@@ -873,6 +945,7 @@ enum NvmeStatusCodes {
     NVME_SGL_DESCR_TYPE_INVALID = 0x0011,
     NVME_INVALID_USE_OF_CMB     = 0x0012,
     NVME_INVALID_PRP_OFFSET     = 0x0013,
+    NVME_HOST_ID_INCONSISTENT   = 0x0018,
     NVME_CMD_SET_CMB_REJECTED   = 0x002b,
     NVME_INVALID_CMD_SET        = 0x002c,
     NVME_LBA_RANGE              = 0x0080,
@@ -1010,6 +1083,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_FW_SLOT_INFO   = 0x03,
     NVME_LOG_CHANGED_NSLIST = 0x04,
     NVME_LOG_CMD_EFFECTS    = 0x05,
+    NVME_LOG_RSV_INFO       = 0x80,
 };
 
 typedef struct QEMU_PACKED NvmePSD {
@@ -1151,7 +1225,7 @@ enum NvmeIdCtrlOncs {
     NVME_ONCS_DSM           = 1 << 2,
     NVME_ONCS_WRITE_ZEROES  = 1 << 3,
     NVME_ONCS_FEATURES      = 1 << 4,
-    NVME_ONCS_RESRVATIONS   = 1 << 5,
+    NVME_ONCS_RESERVATIONS  = 1 << 5,
     NVME_ONCS_TIMESTAMP     = 1 << 6,
     NVME_ONCS_VERIFY        = 1 << 7,
     NVME_ONCS_COPY          = 1 << 8,
@@ -1247,6 +1321,8 @@ enum NvmeFeatureIds {
     NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
     NVME_COMMAND_SET_PROFILE        = 0x19,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
+    NVME_HOST_IDENTIFIER            = 0x81,
+    NVME_RESERVATION_NOTICE_MASK    = 0x82,
     NVME_FID_MAX                    = 0x100,
 };
 

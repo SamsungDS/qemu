@@ -45,14 +45,23 @@ typedef struct NvmeBus {
     OBJECT_CHECK(NvmeSubsystem, (obj), TYPE_NVME_SUBSYS)
 #define SUBSYS_SLOT_RSVD (void *)0xFFFF
 
+typedef struct NvmeReservations {
+    uint32_t nsid;
+    uint16_t rtype;
+    bool     rstatus;
+    uint64_t curr_key;
+} NvmeReservations;
+
 typedef struct NvmeSubsystem {
     DeviceState parent_obj;
     NvmeBus     bus;
     uint8_t     subnqn[256];
     char        *serial;
+    uint64_t    map_host_id[NVME_MAX_CONTROLLERS];
 
-    NvmeCtrl      *ctrls[NVME_MAX_CONTROLLERS];
-    NvmeNamespace *namespaces[NVME_MAX_NAMESPACES + 1];
+    NvmeCtrl         *ctrls[NVME_MAX_CONTROLLERS];
+    NvmeNamespace    *namespaces[NVME_MAX_NAMESPACES + 1];
+    NvmeReservations *reservations[NVME_MAX_CONTROLLERS + 1][NVME_MAX_NAMESPACES + 1];
 
     struct {
         char *nqn;
@@ -61,6 +70,8 @@ typedef struct NvmeSubsystem {
 
 int nvme_subsys_register_ctrl(NvmeCtrl *n, Error **errp);
 void nvme_subsys_unregister_ctrl(NvmeSubsystem *subsys, NvmeCtrl *n);
+void nvme_subsys_unregister_all_registrants(NvmeSubsystem *subsys, NvmeCtrl *n,
+                                            uint32_t nsid, uint64_t prkey);
 
 static inline NvmeCtrl *nvme_subsys_ctrl(NvmeSubsystem *subsys,
                                          uint32_t cntlid)
@@ -166,7 +177,9 @@ typedef struct NvmeNamespace {
     int32_t         nr_open_zones;
     int32_t         nr_active_zones;
 
-    NvmeNamespaceParams params;
+    NvmeResvNotification  rsv_notice;
+    NvmeNamespaceParams   params;
+    NvmeReservationStatus rsv_status;
 
     struct {
         uint32_t err_rec;
@@ -357,6 +370,10 @@ static inline const char *nvme_io_opc_str(uint8_t opc)
     case NVME_CMD_WRITE_ZEROES:     return "NVME_NVM_CMD_WRITE_ZEROES";
     case NVME_CMD_DSM:              return "NVME_NVM_CMD_DSM";
     case NVME_CMD_VERIFY:           return "NVME_NVM_CMD_VERIFY";
+    case NVME_CMD_RSV_REGISTER:     return "NVME_NVM_CMD_RSV_REGISTER";
+    case NVME_CMD_RSV_REPORT:       return "NVME_NVM_CMD_RSV_REPORT";
+    case NVME_CMD_RSV_ACQUIRE:      return "NVME_NVM_CMD_RSV_ACQUIRE";
+    case NVME_CMD_RSV_RELEASE:      return "NVME_NVM_CMD_RSV_RELEASE";
     case NVME_CMD_COPY:             return "NVME_NVM_CMD_COPY";
     case NVME_CMD_ZONE_MGMT_SEND:   return "NVME_ZONED_CMD_MGMT_SEND";
     case NVME_CMD_ZONE_MGMT_RECV:   return "NVME_ZONED_CMD_MGMT_RECV";
@@ -458,6 +475,10 @@ typedef struct NvmeCtrl {
     uint64_t    dbbuf_dbs;
     uint64_t    dbbuf_eis;
     bool        dbbuf_enabled;
+    uint8_t     exhid;
+    uint64_t    rsv_log_count;
+    uint64_t    rsv_log_type;
+    uint64_t    rsv_nsid;
 
     struct {
         MemoryRegion mem;
@@ -501,6 +522,7 @@ typedef struct NvmeCtrl {
 
         uint32_t                async_config;
         NvmeHostBehaviorSupport hbs;
+        uint64_t                hostid;
     } features;
 
     NvmePriCtrlCap  pri_ctrl_cap;
@@ -583,5 +605,9 @@ uint16_t nvme_bounce_mdata(NvmeCtrl *n, void *ptr, uint32_t len,
 void nvme_rw_complete_cb(void *opaque, int ret);
 uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len,
                        NvmeCmd *cmd);
+
+uint16_t nvme_ns_rsv_type(NvmeCtrl *n, uint32_t nsid);
+void nvme_rsv_log_page_event(NvmeCtrl *n, uint32_t nsid,
+                             uint64_t rsv_log_type);
 
 #endif /* HW_NVME_NVME_H */

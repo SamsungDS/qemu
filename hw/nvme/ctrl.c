@@ -238,6 +238,8 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_TIMESTAMP]                = true,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
     [NVME_COMMAND_SET_PROFILE]      = true,
+    [NVME_HOST_IDENTIFIER]          = true,
+    [NVME_RESERVATION_NOTICE_MASK]  = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -249,6 +251,8 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
     [NVME_COMMAND_SET_PROFILE]      = NVME_FEAT_CAP_CHANGE,
+    [NVME_HOST_IDENTIFIER]          = NVME_FEAT_CAP_CHANGE,
+    [NVME_RESERVATION_NOTICE_MASK]  = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
 };
 
 static const uint32_t nvme_cse_acs[256] = {
@@ -279,6 +283,10 @@ static const uint32_t nvme_cse_iocs_nvm[256] = {
     [NVME_CMD_VERIFY]               = NVME_CMD_EFF_CSUPP,
     [NVME_CMD_COPY]                 = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_CMD_COMPARE]              = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_RSV_REGISTER]         = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_RSV_REPORT]           = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_RSV_ACQUIRE]          = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_RSV_RELEASE]          = NVME_CMD_EFF_CSUPP,
 };
 
 static const uint32_t nvme_cse_iocs_zoned[256] = {
@@ -290,6 +298,10 @@ static const uint32_t nvme_cse_iocs_zoned[256] = {
     [NVME_CMD_VERIFY]               = NVME_CMD_EFF_CSUPP,
     [NVME_CMD_COPY]                 = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_CMD_COMPARE]              = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_RSV_REGISTER]         = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_RSV_REPORT]           = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_RSV_ACQUIRE]          = NVME_CMD_EFF_CSUPP,
+    [NVME_CMD_RSV_RELEASE]          = NVME_CMD_EFF_CSUPP,
     [NVME_CMD_ZONE_APPEND]          = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_CMD_ZONE_MGMT_SEND]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_CMD_ZONE_MGMT_RECV]       = NVME_CMD_EFF_CSUPP,
@@ -1599,6 +1611,95 @@ static uint16_t nvme_check_dulbe(NvmeNamespace *ns, uint64_t slba,
     return NVME_SUCCESS;
 }
 
+uint16_t nvme_ns_rsv_type(NvmeCtrl *n, uint32_t nsid)
+{
+    NvmeSubsystem *subsys = n->subsys;
+    NvmeReservations *res;
+    NvmeCtrl *ctrl;
+    uint16_t host_id;
+
+    for (int i = 0; i < ARRAY_SIZE(subsys->ctrls); i++) {
+        ctrl = subsys->ctrls[i];
+        if (ctrl) {
+            host_id = subsys->map_host_id[ctrl->cntlid];
+            res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+
+            if (res->nsid == nsid && res->rstatus) {
+                return res->rtype;
+            }
+        }
+    }
+    /* reservation is not acquired */
+    return 0;
+}
+
+static bool nvme_check_write_cmd_behavior(NvmeCtrl *n, uint32_t nsid)
+{
+    NvmeSubsystem *subsys = n->subsys;
+    NvmeReservations *res;
+    uint16_t host_id = subsys->map_host_id[n->cntlid];
+    bool check_cmd_behavior = true;
+    uint16_t exist_rsv_type = nvme_ns_rsv_type(n, nsid);
+
+    if (!exist_rsv_type) {
+        return true;
+    }
+    res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+
+    if (res->nsid == nsid) {
+        if (res->rstatus) {
+            /* Reservation holder */
+            check_cmd_behavior = true;
+        } else {
+            /* Registrant */
+            if (exist_rsv_type == 0x1 || exist_rsv_type == 0x2) {
+                check_cmd_behavior = false;
+            } else {
+                check_cmd_behavior = true;
+            }
+        }
+    } else {
+        /* Non registrant */
+        check_cmd_behavior = false;
+    }
+    return check_cmd_behavior;
+}
+
+static bool nvme_check_read_cmd_behavior(NvmeCtrl *n, uint32_t nsid)
+{
+    NvmeSubsystem *subsys = n->subsys;
+    uint16_t host_id = subsys->map_host_id[n->cntlid];
+    uint16_t exist_rsv_type = nvme_ns_rsv_type(n, nsid);
+    NvmeReservations *res;
+    bool check_cmd_behavior = true;
+
+    if (!exist_rsv_type) {
+        return true;
+    }
+    res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+
+    if (res->nsid == nsid) {
+        if (res->rstatus) {
+            /* Reservation holder */
+            check_cmd_behavior = true;
+        } else {
+            /* Registrant */
+            if (exist_rsv_type == 0x2) {
+                check_cmd_behavior = false;
+            } else {
+                check_cmd_behavior = true;
+            }
+        }
+    } else {
+        /* Non registrant */
+        if (exist_rsv_type == 0x2 || exist_rsv_type == 0x4 ||
+            exist_rsv_type == 0x6) {
+            check_cmd_behavior = false;
+        }
+    }
+    return check_cmd_behavior;
+}
+
 static void nvme_aio_err(NvmeRequest *req, int ret)
 {
     uint16_t status = NVME_SUCCESS;
@@ -2487,6 +2588,12 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeRequest *req)
 
     trace_pci_nvme_dsm(nr, attr);
 
+    if (n->subsys) {
+        bool check_cmd_behavior = nvme_check_write_cmd_behavior(n, nvme_nsid(ns));
+        if (!check_cmd_behavior) {
+            return NVME_NS_RESV_CONFLICT;
+        }
+    }
     if (attr & NVME_DSMGMT_AD) {
         NvmeDSMAIOCB *iocb = blk_aio_get(&nvme_dsm_aiocb_info, ns->blkconf.blk,
                                          nvme_misc_cb, req);
@@ -3099,6 +3206,390 @@ invalid:
     return status;
 }
 
+void nvme_rsv_log_page_event(NvmeCtrl *n, uint32_t nsid, uint64_t rsv_log_type)
+{
+    NvmeSubsystem *subsys = n->subsys;
+    NvmeCtrl *ctrl;
+    NvmeReservations *res;
+    uint16_t host_id;
+
+    for (int i = 0; i < ARRAY_SIZE(subsys->ctrls); i++) {
+        ctrl = subsys->ctrls[i];
+        if (ctrl == n) {
+            continue;
+        }
+
+        if (ctrl) {
+            host_id = subsys->map_host_id[ctrl->cntlid];
+
+            res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+            if (res->nsid == nsid) {
+                ctrl->rsv_log_count = 1;
+                ctrl->rsv_nsid = nsid;
+                ctrl->rsv_log_type = rsv_log_type;
+                if (ctrl->outstanding_aers) {
+                    nvme_enqueue_event(ctrl, NVME_AER_TYPE_IO_SPECIFIC,
+                        0, NVME_LOG_RSV_INFO);
+                }
+            }
+        }
+    }
+}
+
+static uint16_t nvme_rsv_register(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t dw10 = le32_to_cpu(req->cmd.cdw10);
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+    uint32_t iekey = (dw10 >> 3) & 0x1;
+    uint32_t rrega = dw10 & 0x7;
+    NvmeNamespace *ns = nvme_ns(n, nsid);
+    NvmeSubsystem *subsys = n->subsys;
+    NvmeReservationRegister rsv_host;
+    NvmeReservations *res;
+    uint16_t ret = NVME_SUCCESS;
+    uint16_t host_id = subsys->map_host_id[n->cntlid];
+    uint64_t crkey, nrkey;
+    uint16_t rsv_type = 0;
+
+    if (rrega >= 0x3) {
+        return NVME_INVALID_FIELD;
+    }
+
+    ret = nvme_h2c(n, (uint8_t *)&rsv_host, sizeof(rsv_host), req);
+    if (ret) {
+        return ret;
+    }
+
+    crkey = rsv_host.crkey;
+    nrkey = rsv_host.nrkey;
+
+    if (rrega == 0) {
+        res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+        if (res->nsid == nsid) {
+            if (res->curr_key != nrkey) {
+                return NVME_NS_RESV_CONFLICT;
+            }
+
+            if (res->curr_key == nrkey) {
+                ns->rsv_status.gen += 1;
+                return NVME_SUCCESS;
+            }
+        }
+
+        res->nsid = nsid;
+        res->rtype = 0x0;
+        res->rstatus = false;
+        res->curr_key = nrkey;
+        ns->rsv_status.gen += 1;
+        return ret;
+
+    } else if (rrega == 1) {
+        res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+
+        if (res->nsid == nsid) {
+            if (res->rstatus) {
+                rsv_type = res->rtype;
+            }
+            if (iekey != 1 && res->curr_key != crkey) {
+                return NVME_NS_RESV_CONFLICT;
+            }
+
+            memset(res, 0x0, sizeof(*res));
+
+            res = NULL;
+            ns->rsv_status.gen += 1;
+            ret = NVME_SUCCESS;
+        } else {
+            return NVME_NS_RESV_CONFLICT;
+        }
+
+        if (rsv_type == 0x3 || rsv_type == 0x4) {
+            nvme_rsv_log_page_event(n, nsid, 0x02);
+        }
+    return ret;
+    } else {   /*Replace*/
+        res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+        if (res->nsid == nsid) {
+            if (iekey != 1 && res->curr_key != crkey) {
+                return NVME_NS_RESV_CONFLICT;
+            }
+
+            res->curr_key = nrkey;
+            ns->rsv_status.gen += 1;
+            return NVME_SUCCESS;
+        }
+    }
+    return NVME_NS_RESV_CONFLICT;
+}
+
+static uint16_t nvme_rsv_acquire(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t dw10 = le32_to_cpu(req->cmd.cdw10);
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+    uint32_t rsv_type = (dw10 >> 8) & 0xFF;
+    uint32_t iekey = (dw10 >> 3) & 0x1;
+    uint32_t racqa = dw10 & 0x7;
+    NvmeSubsystem *subsys = n->subsys;
+    NvmeReservationAcquire rsv_host;
+    NvmeNamespace *ns = nvme_ns(n, nsid);
+    NvmeReservations *res;
+    uint16_t host_id = subsys->map_host_id[n->cntlid];
+    uint16_t ret = NVME_SUCCESS;
+    uint64_t crkey, prkey;
+    bool is_rsv_changed, is_rsv_holder;
+    uint16_t exist_rsv_type = 0;
+
+    if (racqa >= 0x3 || iekey == 0x1 || rsv_type == 0x0 || rsv_type >= 0x7) {
+        return NVME_INVALID_FIELD;
+    }
+
+    ret = nvme_h2c(n, (uint8_t *)&rsv_host, sizeof(rsv_host), req);
+    if (ret) {
+        return ret;
+    }
+
+    crkey = rsv_host.crkey;
+    prkey = rsv_host.prkey;
+
+    if (racqa == 0) { /*Acquire*/
+        res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+        if (res->nsid != nsid) {
+            return NVME_NS_RESV_CONFLICT;
+        }
+
+        if (res->curr_key == crkey) {
+            if (res->rstatus) {
+                if (res->rtype == rsv_type) {
+                    return ret;
+                } else {
+                    return NVME_NS_RESV_CONFLICT;
+                }
+            } else {
+                if (res->rstatus) {
+                    return NVME_NS_RESV_CONFLICT;
+                }
+                res->rtype = rsv_type;
+                res->rstatus = true;
+                ns->rsv_status.rtype = rsv_type;
+                return ret;
+            }
+        }
+    } else if (racqa == 1 || racqa == 2) {
+        res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+
+        if (res->nsid != nsid) {
+            return NVME_NS_RESV_CONFLICT;
+        }
+
+        if (res->rstatus) {
+            exist_rsv_type = res->rtype;
+            is_rsv_holder = true;
+        }
+
+        if (exist_rsv_type == 0x5 || exist_rsv_type == 0x6) {
+            if (prkey == 0) {
+                nvme_subsys_unregister_all_registrants(subsys, n, nsid, prkey);
+
+                res->rtype = rsv_type;
+                ns->rsv_status.rtype = rsv_type;
+                is_rsv_changed = true;
+                ns->rsv_status.gen += 1;
+            } else {
+                nvme_subsys_unregister_all_registrants(subsys, n, nsid, prkey);
+                ns->rsv_status.gen += 1;
+            }
+        } else if (exist_rsv_type != 0x5 || exist_rsv_type != 0x6) {
+            if (res->curr_key == prkey) {
+                nvme_subsys_unregister_all_registrants(subsys, n, nsid, prkey);
+
+                if (res->rtype != rsv_type) {
+                    is_rsv_changed = true;
+                }
+                res->rtype = rsv_type;
+                ns->rsv_status.rtype = rsv_type;
+                ns->rsv_status.gen += 1;
+            } else {
+                if (prkey != 0) {
+                    nvme_subsys_unregister_all_registrants(subsys, n, nsid, prkey);
+
+                    ns->rsv_status.gen += 1;
+                    ret = NVME_SUCCESS;
+                } else {
+                    return NVME_INVALID_FIELD;
+                }
+            }
+        }
+
+        if (is_rsv_holder == false) {
+            nvme_subsys_unregister_all_registrants(subsys, n, nsid, prkey);
+        }
+
+        if (is_rsv_changed) {
+            nvme_rsv_log_page_event(n, nsid, 0x02);
+        }
+
+        ns->rsv_status.gen += 1;
+        nvme_rsv_log_page_event(n, nsid, 0x01);
+        return ret;
+    }
+    return NVME_NS_RESV_CONFLICT;
+}
+
+static uint16_t nvme_rsv_release(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t dw10 = le32_to_cpu(req->cmd.cdw10);
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+    uint32_t rrela = dw10 & 0x7;
+    uint32_t iekey = (dw10 >> 3) & 0x1;
+    uint32_t rsv_type = (dw10 >> 8) & 0xFF;
+    NvmeNamespace *ns = nvme_ns(n, nsid);
+    NvmeSubsystem *subsys = n->subsys;
+    NvmeReservations *res;
+    uint64_t crkey;
+    uint16_t ret = NVME_SUCCESS;
+    uint16_t host_id = subsys->map_host_id[n->cntlid];
+    uint16_t exist_rsv_type = 0;
+    bool is_rsv_released;
+
+    if (iekey == 0x1 || rrela >= 0x2) {
+        return NVME_INVALID_FIELD;
+    }
+
+    ret = nvme_h2c(n, (uint8_t *)&crkey, sizeof(crkey), req);
+    if (ret) {
+        return ret;
+    }
+
+    if (rrela == 1) {
+        res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+
+        if (res->nsid != nsid) {
+            return NVME_NS_RESV_CONFLICT;
+        }
+
+        if (res->curr_key != crkey) {
+            return NVME_NS_RESV_CONFLICT;
+        } else{
+            res->rtype = 0x0;
+            res->rstatus = false;
+            res->nsid = 0x0;
+            res->curr_key = 0x0;
+            ns->rsv_status.rtype = 1;
+            ns->rsv_status.gen += 1;
+
+            /* prkey is not relevant hence set as 0 */
+            nvme_subsys_unregister_all_registrants(subsys, n, nsid, 0);
+            nvme_rsv_log_page_event(n, nsid, 0x03);
+        }
+        return ret;
+    } else { /*RRELA = 0 means Release */
+        res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+
+        if (res->curr_key != crkey) {
+            return NVME_NS_RESV_CONFLICT;
+        }
+        if (!res->rstatus) {
+            return NVME_SUCCESS;
+        }
+
+        if (res->rstatus &&
+            res->rtype != rsv_type) {
+            return NVME_INVALID_FIELD;
+        } else {
+            exist_rsv_type = res->rtype;
+            if (exist_rsv_type != 0) {
+                is_rsv_released = true;
+                res->rtype = 0x0;
+                res->rstatus = false;
+                ns->rsv_status.rtype = 0x0;
+            }
+        }
+
+        if (is_rsv_released && (exist_rsv_type != 0x1 ||
+            exist_rsv_type != 0x2)) {
+            nvme_rsv_log_page_event(n, nsid, 0x02);
+        }
+        return ret;
+    }
+}
+
+static uint16_t nvme_rsv_report(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t dw10 = le32_to_cpu(req->cmd.cdw10);
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+    uint8_t eds = dw11 & 0x1;
+    NvmeReservations *res;
+    NvmeNamespace *ns = nvme_ns(n, nsid);
+    NvmeSubsystem *subsys = n->subsys;
+    NvmeReservationStatusReport *rsv_report;
+    NvmeRegisteredControllerData res_ctrl_data_struct_temp;
+    uint16_t host_id = subsys->map_host_id[n->cntlid];
+    uint16_t ret;
+    uint32_t numd = dw10;
+    NvmeCtrl *ctrl;
+    int data_len_report, data_len_for_memory;
+    uint16_t reg_controller = 0;
+    int k = 0;
+
+    int data_len = (4) * (numd + 1);
+
+    /* For EDS value 1 and 64-bit host identifier */
+    if (eds == 0x1 && n->exhid == 0x0) {
+        return NVME_HOST_ID_INCONSISTENT;
+    }
+
+    /* 128-bit host identifier currently not supported */
+    if (n->exhid == 0x1) {
+        return NVME_HOST_ID_INCONSISTENT;
+    }
+
+    data_len_report = sizeof(NvmeReservationStatusReport);
+    data_len_for_memory = (data_len > data_len_report) ? data_len : data_len_report;
+
+    rsv_report = g_malloc0(data_len_for_memory);
+    memset(rsv_report, 0, data_len_for_memory);
+
+    for (int i = 0; i < ARRAY_SIZE(subsys->ctrls); i++) {
+        ctrl = subsys->ctrls[i];
+        if (ctrl) {
+            host_id = subsys->map_host_id[ctrl->cntlid];
+
+            res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+            if (res->nsid == nsid) {
+
+                res_ctrl_data_struct_temp.cntlid = n->cntlid;
+
+                if (res->rstatus) {
+                    res_ctrl_data_struct_temp.rcsts = 1;
+                } else {
+                    res_ctrl_data_struct_temp.rcsts = 0;
+                }
+
+                res_ctrl_data_struct_temp.hostid = host_id;
+                res_ctrl_data_struct_temp.rkey = res->curr_key;
+                rsv_report->res_ctl_struct[k++] = res_ctrl_data_struct_temp;
+                ++reg_controller;
+            }
+        }
+    }
+
+    if (!reg_controller) {
+        ns->rsv_status.rtype = 0;
+    }
+
+    if (ns) {
+        ns->rsv_status.regctl = reg_controller;
+        ns->rsv_status.ptpls = 0;
+    }
+
+    rsv_report->res_status = ns->rsv_status;
+    ret = nvme_c2h(n, (uint8_t *)rsv_report, data_len, req);
+
+    return ret;
+}
+
+
 static uint16_t nvme_compare(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
@@ -3118,6 +3609,14 @@ static uint16_t nvme_compare(NvmeCtrl *n, NvmeRequest *req)
     if (NVME_ID_NS_DPS_TYPE(ns->id_ns.dps) && (prinfo & NVME_PRINFO_PRACT)) {
         return NVME_INVALID_PROT_INFO | NVME_DNR;
     }
+
+    if (n->subsys) {
+        bool check_cmd_behavior = nvme_check_read_cmd_behavior(n, nvme_nsid(ns));
+        if (!check_cmd_behavior) {
+            return NVME_NS_RESV_CONFLICT;
+        }
+    }
+
 
     if (nvme_ns_ext(ns)) {
         len += nvme_m2b(ns, nlb);
@@ -3324,6 +3823,14 @@ static uint16_t nvme_read(NvmeCtrl *n, NvmeRequest *req)
 
     trace_pci_nvme_read(nvme_cid(req), nvme_nsid(ns), nlb, mapped_size, slba);
 
+    if (n->subsys) {
+        bool check_cmd_behavior = nvme_check_read_cmd_behavior(n, nvme_nsid(ns));
+        if (!check_cmd_behavior) {
+            return NVME_NS_RESV_CONFLICT;
+        }
+    }
+
+
     status = nvme_check_mdts(n, mapped_size);
     if (status) {
         goto invalid;
@@ -3485,6 +3992,13 @@ static uint16_t nvme_do_write(NvmeCtrl *n, NvmeRequest *req, bool append,
 
     if (NVME_ID_NS_DPS_TYPE(ns->id_ns.dps)) {
         return nvme_dif_rw(n, req);
+    }
+
+    if (n->subsys) {
+        bool check_cmd_behavior = nvme_check_write_cmd_behavior(n, nvme_nsid(ns));
+        if (!check_cmd_behavior) {
+            return NVME_NS_RESV_CONFLICT;
+        }
     }
 
     if (!wrz) {
@@ -4220,6 +4734,14 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
         return nvme_dsm(n, req);
     case NVME_CMD_VERIFY:
         return nvme_verify(n, req);
+    case NVME_CMD_RSV_REGISTER:
+        return nvme_rsv_register(n, req);
+    case NVME_CMD_RSV_REPORT:
+        return nvme_rsv_report(n, req);
+    case NVME_CMD_RSV_ACQUIRE:
+        return nvme_rsv_acquire(n, req);
+    case NVME_CMD_RSV_RELEASE:
+        return nvme_rsv_release(n, req);
     case NVME_CMD_COPY:
         return nvme_copy(n, req);
     case NVME_CMD_ZONE_MGMT_SEND:
@@ -4640,6 +5162,33 @@ static uint16_t nvme_cmd_effects(NvmeCtrl *n, uint8_t csi, uint32_t buf_len,
     return nvme_c2h(n, ((uint8_t *)&log) + off, trans_len, req);
 }
 
+static uint16_t nvme_rsv_logpage(NvmeCtrl *n,  uint32_t buf_len, uint64_t off,
+                                 NvmeRequest *req)
+{
+    NvmeReservationLogPage rsv_log;
+    uint32_t trans_len;
+    uint16_t status = NVME_SUCCESS;
+
+    if (off >= sizeof(rsv_log)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    memset(&rsv_log, 0, sizeof(NvmeReservationLogPage));
+
+    rsv_log.log_page_count = n->rsv_log_count;
+
+    if (rsv_log.log_page_count != 0) {
+        rsv_log.num_available_log_pages = 0;
+        rsv_log.nsid = n->rsv_nsid;
+        rsv_log.rsv_log_page_type = n->rsv_log_type;
+    }
+
+    trans_len = MIN(sizeof(rsv_log) - off, buf_len);
+    status = nvme_c2h(n, (uint8_t *)&rsv_log + off, trans_len, req);
+
+    n->rsv_log_count = 0;
+    return status;
+}
+
 static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeCmd *cmd = &req->cmd;
@@ -4687,6 +5236,8 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
         return nvme_changed_nslist(n, rae, len, off, req);
     case NVME_LOG_CMD_EFFECTS:
         return nvme_cmd_effects(n, csi, len, off, req);
+    case NVME_LOG_RSV_INFO:
+        return nvme_rsv_logpage(n, len, off, req);
     default:
         trace_pci_nvme_err_invalid_log_page(nvme_cid(req), lid);
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -5382,6 +5933,21 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
     case NVME_HOST_BEHAVIOR_SUPPORT:
         return nvme_c2h(n, (uint8_t *)&n->features.hbs,
                         sizeof(n->features.hbs), req);
+    case NVME_HOST_IDENTIFIER:
+        nvme_c2h(n, (uint8_t *)&n->features.hostid, sizeof(n->features.hostid), req);
+        break;
+
+	case NVME_RESERVATION_NOTICE_MASK:
+		if ((((n->id_ctrl.oncs >> 5) & 0x1) != 1) ||
+            (nsid == NVME_NSID_BROADCAST)) {
+			return NVME_INVALID_FIELD | NVME_DNR;
+		}
+		ns = nvme_ns(n, nsid);
+		result = cpu_to_le32((ns->rsv_notice.regpre << 1) |
+							 (ns->rsv_notice.resrel << 2) |
+                             (ns->rsv_notice.respre << 3));
+		break;
+
     default:
         break;
     }
@@ -5440,6 +6006,15 @@ static uint16_t nvme_set_feature_timestamp(NvmeCtrl *n, NvmeRequest *req)
     return NVME_SUCCESS;
 }
 
+static void nvme_modify_reservation_masks(NvmeNamespace *ns, uint32_t dw11)
+{
+    if (ns) {
+        ns->rsv_notice.regpre = (dw11 >> 1) & 0x1;
+        ns->rsv_notice.resrel = (dw11 >> 2) & 0x1;
+        ns->rsv_notice.respre = (dw11 >> 3) & 0x1;
+    }
+}
+
 static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeNamespace *ns = NULL;
@@ -5450,6 +6025,10 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
     uint8_t fid = NVME_GETSETFEAT_FID(dw10);
     uint8_t save = NVME_SETFEAT_SAVE(dw10);
+    NvmeSubsystem *subsys;
+    NvmeReservations *res;
+    uint64_t curr_host_id, prev_host_id;
+    uint16_t ret;
     uint16_t status;
     int i;
 
@@ -5599,6 +6178,48 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
             return NVME_CMD_SET_CMB_REJECTED | NVME_DNR;
         }
         break;
+    case NVME_HOST_IDENTIFIER:
+        subsys = n->subsys;
+        n->exhid = dw11 & 0x1;
+        if ((n->id_ctrl.ctratt & 0x1) != 1) {
+            if ((dw11 & 0x1) == 1) {
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+        }
+        if ((n->id_ctrl.ctratt & 0x1) == 1) {
+            if ((dw11 & 0x1) == 0) {
+                return NVME_INVALID_FIELD | NVME_DNR;
+            }
+        }
+
+        ret = nvme_h2c(n, (uint8_t *)&n->features.hostid, sizeof(n->features.hostid), req);
+        if (ret) {
+            return ret;
+        }
+
+        curr_host_id = n->features.hostid;
+        prev_host_id = subsys->map_host_id[n->cntlid];
+        if (curr_host_id != prev_host_id) {
+            subsys->map_host_id[n->cntlid] = curr_host_id;
+            res = subsys->reservations[prev_host_id % NVME_MAX_CONTROLLERS][nsid];
+            subsys->reservations[curr_host_id % NVME_MAX_CONTROLLERS][nsid] = res;
+            if (res) {
+                memset(res, 0x0, sizeof(*res));
+                res = NULL;
+            }
+		}
+		break;
+	case NVME_RESERVATION_NOTICE_MASK:
+		if (nsid == NVME_NSID_BROADCAST) {
+			for (int i = 1; i <= NVME_MAX_NAMESPACES; i++) {
+				ns = nvme_ns(n, i);
+				nvme_modify_reservation_masks(ns, dw11);
+			}
+		} else {
+			ns = nvme_ns(n, nsid);
+			nvme_modify_reservation_masks(ns, dw11);
+		}
+		break;
     default:
         return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
     }
