@@ -26,8 +26,8 @@ static void build_dvsecs(CXLType3Dev *ct3d)
         .range1_size_hi = ct3d->hostmem->size >> 32,
         .range1_size_lo = (2 << 5) | (2 << 2) | 0x3 |
         (ct3d->hostmem->size & 0xF0000000),
-        .range1_base_hi = 0,
-        .range1_base_lo = 0,
+        .range1_base_hi = ct3d->hostmem_as.root->addr >> 32,
+        .range1_base_lo = (ct3d->hostmem_as.root->addr & 0xFFFFFFFF),
     };
     cxl_component_create_dvsec(cxl_cstate, CXL2_TYPE3_DEVICE,
                                PCIE_CXL_DEVICE_DVSEC_LENGTH,
@@ -111,6 +111,7 @@ static bool cxl_setup_memory(CXLType3Dev *ct3d, Error **errp)
         error_setg(errp, "memdev property must be set");
         return false;
     }
+    mr->addr = ct3d->hdm1base;
     memory_region_set_nonvolatile(mr, true);
     memory_region_set_enabled(mr, true);
     host_memory_backend_set_mapped(ct3d->hostmem, true);
@@ -129,6 +130,8 @@ static bool cxl_setup_memory(CXLType3Dev *ct3d, Error **errp)
         error_setg(errp, "lsa property must be set");
         return false;
     }
+    if (mr->addr)
+        memory_region_add_subregion(get_system_memory(), mr->addr, mr);
 
     return true;
 }
@@ -275,6 +278,8 @@ static Property ct3_props[] = {
                      HostMemoryBackend *),
     DEFINE_PROP_LINK("lsa", CXLType3Dev, lsa, TYPE_MEMORY_BACKEND,
                      HostMemoryBackend *),
+    DEFINE_PROP_UINT64("hdm1base", CXLType3Dev, hdm1base, 0),
+
     DEFINE_PROP_END_OF_LIST(),
 };
 
