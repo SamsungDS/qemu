@@ -231,6 +231,10 @@ typedef struct NvmeNamespaceParams {
         char *ruhs;
     } fdp;
     bool     perm_wr_protect;
+    struct {
+        bool enabled;
+        uint16_t maxkt;
+    } kpios;
 } NvmeNamespaceParams;
 
 typedef struct NvmeAtomic {
@@ -254,6 +258,12 @@ typedef struct NvmeNamespace {
     uint16_t     status;
     int          attached;
     uint8_t      pif;
+    uint8_t      kpios;
+    uint16_t     maxkt;
+    bool         keytag[11];
+
+#define NVME_NS_SHARED              (1 << 0)
+    unsigned long flags;
 
     struct {
         uint16_t zrwas;

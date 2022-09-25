@@ -968,7 +968,8 @@ typedef struct QEMU_PACKED NvmeCopySourceRangeFormat0_2 {
     uint8_t  rsvd4[4];
     uint64_t slba;
     uint16_t nlb;
-    uint8_t  rsvd18[4];
+    uint16_t rpars_opts;
+    uint16_t cev;
     uint16_t sopt;
     uint32_t reftag;
     uint16_t apptag;
@@ -980,7 +981,8 @@ typedef struct QEMU_PACKED NvmeCopySourceRangeFormat1_3 {
     uint8_t  rsvd4[4];
     uint64_t slba;
     uint16_t nlb;
-    uint8_t  rsvd18[4];
+    uint16_t rpars_opts;
+    uint16_t cev;
     uint16_t sopt;
     uint8_t  rsvd24[2];
     uint8_t  sr[10];
@@ -1052,6 +1054,8 @@ enum NvmeStatusCodes {
     NVME_SANITIZE_IN_PROGRESS   = 0x001d,
     NVME_NS_WRITE_PROT          = 0x0020,
     NVME_COMMAND_INTERRUPTED    = 0x0021,
+    NVME_INVALID_KEY_TAG        = 0x0025,
+    NVME_INCORRECT_KEY          = 0x0028,
     NVME_FDP_DISABLED           = 0x0029,
     NVME_INVALID_PHID_LIST      = 0x002a,
     NVME_LBA_RANGE              = 0x0080,
@@ -1405,7 +1409,9 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint8_t     rsvd332[6];
     uint16_t    nsetidmax;
     uint16_t    endgidmax;
-    uint8_t     rsvd342[170];
+    uint8_t     rsvd342[16];
+    uint8_t     kpioc;
+    uint8_t     rsvd359[153];
     uint8_t     sqes;
     uint8_t     cqes;
     uint16_t    maxcmd;
@@ -1734,7 +1740,9 @@ typedef struct QEMU_PACKED NvmeIdNsInd {
     uint16_t    nvmsetid;
     uint16_t    endgrpid;
     uint8_t     nstat;
-    uint8_t     rsvd15[4081];
+    uint8_t     kpios;
+    uint16_t    maxkt;
+    uint8_t     rsvd18[4078];
 } NvmeIdNsInd;
 
 typedef struct QEMU_PACKED NvmeIdNsDescr {

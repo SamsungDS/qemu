@@ -337,6 +337,10 @@ static void nvme_process_sq(void *opaque);
 static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst);
 static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n);
 
+static bool nvme_ns_kpios_enabled(NvmeNamespace *ns) {
+    return ns->kpios & 0x1;
+}
+
 static uint16_t nvme_sqid(NvmeRequest *req)
 {
     return le16_to_cpu(req->sq->sqid);
@@ -2862,8 +2866,26 @@ static uint16_t nvme_verify(NvmeCtrl *n, NvmeRequest *req)
     uint32_t reftag = le32_to_cpu(rw->reftag);
     NvmeBounceContext *ctx = NULL;
     uint16_t status;
+    uint8_t cetype = 0;
+    uint16_t cev = 0;
 
     trace_pci_nvme_verify(nvme_cid(req), nvme_nsid(ns), slba, nlb);
+
+    if (nvme_ns_kpios_enabled(ns)) {
+        cetype = (req->cmd.cdw12 & 0x000F0000) >> 16;
+        if (cetype > 0x1 && cetype < 0xF) {
+            return NVME_INVALID_FIELD;
+        }
+        if (cetype == 1) {
+            cev = req->cmd.cdw13 & 0x0000FFFF;
+            if (cev > ns->maxkt) {
+                return NVME_INVALID_KEY_TAG;
+            }
+            if (!ns->keytag[cev]) {
+                return NVME_INCORRECT_KEY;
+            }
+        }
+    }
 
     if (NVME_ID_NS_DPS_TYPE(ns->id_ns.dps)) {
         status = nvme_check_prinfo(ns, prinfo, slba, reftag);
@@ -3374,6 +3396,8 @@ static void nvme_do_copy(NvmeCopyAIOCB *iocb)
     uint16_t status;
     uint32_t dnsid = le32_to_cpu(req->cmd.nsid);
     uint32_t snsid = dnsid;
+    uint8_t cetype = 0;
+    uint16_t cev = 0;
 
     if (iocb->ret < 0) {
         goto done;
@@ -3381,6 +3405,33 @@ static void nvme_do_copy(NvmeCopyAIOCB *iocb)
 
     if (iocb->idx == iocb->nr) {
         goto done;
+    }
+
+    if (nvme_ns_kpios_enabled(dns)) {
+        if (iocb->format == NVME_COPY_FORMAT_0) {
+            NvmeCopySourceRangeFormat0_2 *_ranges = iocb->ranges;
+            cetype = le16_to_cpu(_ranges[iocb->idx].rpars_opts) & 0x3;
+            cev = le16_to_cpu(_ranges[iocb->idx].cev);
+        } else if (iocb->format == NVME_COPY_FORMAT_1) {
+            NvmeCopySourceRangeFormat1_3 *_ranges = iocb->ranges;
+            cetype = le16_to_cpu(_ranges[iocb->idx].rpars_opts) & 0x3;
+            cev = le16_to_cpu(_ranges[iocb->idx].cev);
+        }
+
+        if (cetype > 0x1 && cetype < 0xF) {
+            status = NVME_INVALID_FIELD;
+            goto invalid;
+        }
+        if (cetype == 1) {
+            if (cev > dns->maxkt) {
+                status = NVME_INVALID_KEY_TAG;
+                goto invalid;
+            }
+            if (!dns->keytag[cev]) {
+                status = NVME_INCORRECT_KEY;
+                goto invalid;
+            }
+        }
     }
 
     if (iocb->format == 2 || iocb->format == 3) {
@@ -3522,11 +3573,29 @@ static uint16_t nvme_copy(NvmeCtrl *n, NvmeRequest *req)
     size_t len = sizeof(NvmeCopySourceRangeFormat0_2);
 
     uint16_t status;
+    uint8_t cetype = 0;
+    uint16_t cev = 0;
 
     trace_pci_nvme_copy(nvme_cid(req), nvme_nsid(ns), nr, format);
 
     iocb->ranges = NULL;
     iocb->zone = NULL;
+
+    if (nvme_ns_kpios_enabled(ns)) {
+        cetype = (req->cmd.cdw12 & 0x000F0000) >> 16;
+        if (cetype > 0x1 && cetype < 0xF) {
+            status = NVME_INVALID_FIELD;
+            goto invalid;
+        }
+        if (cetype == 1) {
+            cev = req->cmd.cdw13 & 0x0000FFFF;
+            if (cev > ns->maxkt) {
+                status = NVME_INVALID_KEY_TAG;
+                goto invalid;
+            }
+            ns->keytag[cev] = 1;
+        }
+    }
 
     if (!(n->id_ctrl.ocfs & (1 << format)) ||
         ((format == 2 || format == 3) &&
@@ -3576,6 +3645,12 @@ static uint16_t nvme_copy(NvmeCtrl *n, NvmeRequest *req)
     status = nvme_check_copy_mcl(ns, iocb, nr);
     if (status) {
         goto invalid;
+    }
+
+    if (nvme_ns_kpios_enabled(req->ns)) {
+        if (format != NVME_COPY_FORMAT_0 && format != NVME_COPY_FORMAT_1) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
     }
 
     iocb->req = req;
@@ -3998,8 +4073,26 @@ static uint16_t nvme_compare(NvmeCtrl *n, NvmeRequest *req)
     int64_t offset = nvme_l2b(ns, slba);
     struct nvme_compare_ctx *ctx = NULL;
     uint16_t status;
+    uint8_t cetype = 0;
+    uint16_t cev = 0;
 
     trace_pci_nvme_compare(nvme_cid(req), nvme_nsid(ns), slba, nlb);
+
+    if (nvme_ns_kpios_enabled(ns)) {
+        cetype = (req->cmd.cdw12 & 0x000F0000) >> 16;
+        if (cetype > 0x1 && cetype < 0xF) {
+            return NVME_INVALID_FIELD;
+        }
+        if (cetype == 1) {
+            cev = req->cmd.cdw13 & 0x0000FFFF;
+            if (cev > ns->maxkt) {
+                return NVME_INVALID_KEY_TAG;
+            }
+            if (!ns->keytag[cev]) {
+                return NVME_INCORRECT_KEY;
+            }
+        }
+    }
 
     if (NVME_ID_NS_DPS_TYPE(ns->id_ns.dps) && (prinfo & NVME_PRINFO_PRACT)) {
         return NVME_INVALID_PROT_INFO | NVME_DNR;
@@ -4198,6 +4291,27 @@ static uint16_t nvme_read(NvmeCtrl *n, NvmeRequest *req)
     uint64_t data_offset;
     BlockBackend *blk = ns->blkconf.blk;
     uint16_t status;
+    uint8_t cetype = 0;
+    uint16_t cev = 0;
+
+    if (nvme_ns_kpios_enabled(ns)) {
+        cetype = (req->cmd.cdw12 & 0x000F0000) >> 16;
+        if (cetype > 0x1 && cetype < 0xF) {
+            status = NVME_INVALID_FIELD;
+            goto invalid;
+        }
+        if (cetype == 1) {
+            cev = req->cmd.cdw13 & 0x0000FFFF;
+            if (cev > ns->maxkt) {
+                status = NVME_INVALID_KEY_TAG;
+                goto invalid;
+            }
+            if (!ns->keytag[cev]) {
+                status = NVME_INCORRECT_KEY;
+                goto invalid;
+            }
+        }
+    }
 
     if ((ns->id_ns.nsattr & 0x1) == 1) {
         return NVME_NS_WRITE_PROT | NVME_DNR;
@@ -4328,6 +4442,24 @@ static uint16_t nvme_do_write(NvmeCtrl *n, NvmeRequest *req, bool append,
     NvmeZonedResult *res = (NvmeZonedResult *)&req->cqe;
     BlockBackend *blk = ns->blkconf.blk;
     uint16_t status;
+    uint8_t cetype = 0;
+    uint16_t cev = 0;
+
+    if (nvme_ns_kpios_enabled(ns)) {
+        cetype = (req->cmd.cdw12 & 0x000F0000) >> 16;
+        if (cetype > 0x1 && cetype < 0xF) {
+            status = NVME_INVALID_FIELD;
+            goto invalid;
+        }
+        if (cetype == 1) {
+            cev = req->cmd.cdw13 & 0x0000FFFF;
+            if (cev > ns->maxkt) {
+                status = NVME_INVALID_KEY_TAG;
+                goto invalid;
+            }
+            ns->keytag[cev] = 1;
+        }
+    }
 
     if (nvme_ns_ext(ns) && !(NVME_ID_CTRL_CTRATT_MEM(n->id_ctrl.ctratt))) {
         mapped_size += nvme_m2b(ns, nlb);
@@ -10202,6 +10334,9 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->psd[0].exlat = cpu_to_le32(0x4);
 
     id->ctratt = cpu_to_le32(ctratt);
+
+    /* setting kpio capabilities */
+    id->kpioc = 3;
 
     NVME_CAP_SET_MQES(cap, n->params.administrative ? 0 : 0x7ff);
     NVME_CAP_SET_CQR(cap, 1);
