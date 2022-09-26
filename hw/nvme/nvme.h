@@ -19,6 +19,7 @@
 #define HW_NVME_NVME_H
 
 #include "qemu/uuid.h"
+#include "hw/cxl/cxl.h"
 #include "hw/pci/pci.h"
 #include "hw/block/block.h"
 
@@ -430,7 +431,10 @@ typedef struct NvmeParams {
 } NvmeParams;
 
 typedef struct NvmeCtrl {
-    PCIDevice    parent_obj;
+    union {
+        PCIDevice parent_obj;
+        CXLType3Dev  ct3d_parent_obj;
+    };
     MemoryRegion bar0;
     MemoryRegion iomem;
     NvmeBar      bar;
