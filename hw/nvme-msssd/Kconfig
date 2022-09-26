@@ -1,0 +1,4 @@
+config NVME_MSSSD
+    bool
+    default y if PCI_DEVICES
+    select CXL_MEM_DEVICE

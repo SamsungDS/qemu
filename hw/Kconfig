@@ -23,6 +23,7 @@ source misc/Kconfig
 source net/Kconfig
 source nubus/Kconfig
 source nvme/Kconfig
+source nvme-msssd/Kconfig
 source nvram/Kconfig
 source pci-bridge/Kconfig
 source pci-host/Kconfig
