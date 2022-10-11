@@ -1027,6 +1027,18 @@ typedef struct QEMU_PACKED NvmePSD {
 #define NVME_CONTROLLER_LIST_SIZE 2048
 #define NVME_IDENTIFY_DATA_SIZE 4096
 
+typedef struct NvmeErrorInjection {
+    uint8_t   eef;
+    uint8_t   rsvd1;
+    uint16_t  eit;
+    uint8_t   eitsd[28];
+} NvmeErrorInjection;
+
+typedef struct NvmeGetFeatureDword0 {
+    uint8_t   nei;
+    uint32_t  rsvd1;
+} NvmeGetFeatureDword0;
+
 enum NvmeIdCns {
     NVME_ID_CNS_NS                    = 0x00,
     NVME_ID_CNS_CTRL                  = 0x01,
@@ -1248,6 +1260,7 @@ enum NvmeFeatureIds {
     NVME_COMMAND_SET_PROFILE        = 0x19,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_FID_MAX                    = 0x100,
+    NVME_ERROR_INJECTION            = 0xc0,
 };
 
 typedef enum NvmeFeatureCap {

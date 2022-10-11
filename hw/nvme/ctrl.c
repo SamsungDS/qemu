@@ -238,6 +238,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_TIMESTAMP]                = true,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
     [NVME_COMMAND_SET_PROFILE]      = true,
+    [NVME_ERROR_INJECTION]          = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -249,6 +250,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
     [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
     [NVME_COMMAND_SET_PROFILE]      = NVME_FEAT_CAP_CHANGE,
+    [NVME_ERROR_INJECTION]          = NVME_FEAT_CAP_CHANGE,
 };
 
 static const uint32_t nvme_cse_acs[NVME_MAX_COMMANDS] = {
@@ -3338,6 +3340,20 @@ static uint16_t nvme_read(NvmeCtrl *n, NvmeRequest *req)
     block_acct_start(blk_get_stats(blk), &req->acct, data_size,
                      BLOCK_ACCT_READ);
     nvme_blk_read(blk, data_offset, nvme_rw_cb, req);
+    n->features.ocp.nrtdp++;
+
+    for (int i = 0; i < n->features.ocp.nei; i++) {
+        n->features.ocp.eit_spec = ((n->features.ocp.ocp_errds[i].eitsd[1] << 8) |
+                                    (n->features.ocp.ocp_errds[i].eitsd[0]));
+        if ((n->features.ocp.ocp_errds[i].eef & 1) &&
+         (n->features.ocp.nrtdp == n->features.ocp.eit_spec)) {
+
+            --n->features.ocp.outs_nei;
+            memset(&n->features.ocp.ocp_errds[i] , 0 , 32);
+            nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
+                NVME_AER_TYPE_NOTICE, NVME_LOG_ERROR_INFO);
+        }
+    }
     return NVME_NO_COMPLETE;
 
 invalid:
@@ -5260,7 +5276,7 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
     uint16_t iv;
     NvmeNamespace *ns;
     int i;
-
+    n->features.ocp.ocp_getdwr0.nei = n->features.ocp.outs_nei;
     static const uint32_t nvme_feature_default[NVME_FID_MAX] = {
         [NVME_ARBITRATION] = NVME_ARB_AB_NOLIMIT,
     };
@@ -5364,6 +5380,10 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
     case NVME_HOST_BEHAVIOR_SUPPORT:
         return nvme_c2h(n, (uint8_t *)&n->features.hbs,
                         sizeof(n->features.hbs), req);
+    case NVME_ERROR_INJECTION:
+        nvme_c2h(n, (uint8_t *)n->features.ocp.ocp_errds, 4096, req);
+        result = cpu_to_le32(*(uint32_t *)&n->features.ocp.ocp_getdwr0);
+        break;
     default:
         break;
     }
@@ -5588,6 +5608,34 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
             return NVME_CMD_SET_CMB_REJECTED | NVME_DNR;
         }
         break;
+    case NVME_ERROR_INJECTION:
+    {
+        uint8_t nei = dw11 & 0x007F;
+
+        status = nvme_h2c(n, (uint8_t *)n->features.ocp.ocp_errds, 4096,
+                        req);
+        n->features.ocp.nei = nei;
+        n->features.ocp.outs_nei = nei;
+
+        for (int i = 0; i < nei; i++) {
+            if ((n->features.ocp.ocp_errds[i].eef == 0) &&
+                    (n->features.ocp.ocp_errds[i].rsvd1 == 0) &&
+                    (n->features.ocp.ocp_errds[i].eit == 0)) {
+                    n->features.ocp.outs_nei--;
+                    continue;
+            } else if (!n->features.ocp.ocp_errds[i].eef & 1) {
+                    memset(&n->features.ocp.ocp_errds[i] , 0 , 32);
+                    n->features.ocp.outs_nei--;
+                    continue;
+            } else if ((n->features.ocp.ocp_errds[i].eef == 1) ||
+                     (n->features.ocp.ocp_errds[i].eef > 3) ||
+                    (n->features.ocp.ocp_errds[i].eit == 0x0000) ||
+                    (n->features.ocp.ocp_errds[i].eit > 0x000A))
+                    return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        n->features.ocp.nrtdp = 0;
+        return status;
+    }
     default:
         return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
     }

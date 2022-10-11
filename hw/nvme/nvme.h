@@ -503,6 +503,14 @@ typedef struct NvmeCtrl {
 
         uint32_t                async_config;
         NvmeHostBehaviorSupport hbs;
+        struct {
+            uint8_t                nei;
+            uint8_t                outs_nei;
+            uint16_t               nrtdp;
+            uint16_t               eit_spec;
+            NvmeErrorInjection     ocp_errds[128];
+            NvmeGetFeatureDword0   ocp_getdwr0;
+        } ocp;
     } features;
 
     struct {
