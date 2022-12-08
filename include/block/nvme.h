@@ -1147,7 +1147,7 @@ enum NvmeIdCtrlOacs {
 
 enum NvmeIdCtrlOncs {
     NVME_ONCS_COMPARE       = 1 << 0,
-    NVME_ONCS_WRITE_UNCORR  = 1 << 1,
+    NVME_ONCS_WRITE_UNCOR   = 1 << 1,
     NVME_ONCS_DSM           = 1 << 2,
     NVME_ONCS_WRITE_ZEROES  = 1 << 3,
     NVME_ONCS_FEATURES      = 1 << 4,

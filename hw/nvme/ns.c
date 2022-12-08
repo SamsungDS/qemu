@@ -67,6 +67,8 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
     ns->csi = NVME_CSI_NVM;
     ns->status = 0x0;
 
+    ns->uncorrectable = bitmap_new(id_ns->nsze);
+
     ns->id_ns.dlfeat = 0x1;
 
     /* support DULBE and I/O optimization fields */
@@ -525,6 +527,8 @@ void nvme_ns_cleanup(NvmeNamespace *ns)
         g_free(ns->zone_array);
         g_free(ns->zd_extensions);
     }
+
+    g_free(ns->uncorrectable);
 }
 
 static void nvme_ns_unrealize(DeviceState *dev)
