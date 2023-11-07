@@ -7562,6 +7562,56 @@ static void nvme_cmb_enable_regs(NvmeCtrl *n)
     stl_le_p(&n->bar.cmbsz, cmbsz);
 }
 
+static void nvme_write_bar_pmrctl(NvmeCtrl *n, uint64_t pmrctl)
+{
+    uint64_t cap = ldq_le_p(&n->bar.cap);
+    uint32_t pmrsts;
+
+    if (!NVME_CAP_PMRS(cap)) {
+        return;
+    }
+
+    stl_le_p(&n->bar.pmrctl, pmrctl);
+    if (NVME_PMRCTL_EN(pmrctl)) {
+        memory_region_set_enabled(&n->pmr.dev->mr, true);
+        pmrsts = 0;
+    } else {
+        memory_region_set_enabled(&n->pmr.dev->mr, false);
+        pmrsts = ldl_le_p(&n->bar.pmrsts);
+        NVME_PMRSTS_SET_NRDY(pmrsts, 1);
+        n->pmr.cmse = false;
+    }
+    stl_le_p(&n->bar.pmrsts, pmrsts);
+}
+
+static void nvme_subsys_reset(NvmeCtrl *n, uint64_t data)
+{
+    NvmeSubsystem *subsys = n->subsys;
+    NvmeCtrl *ctrl;
+    int cntlid;
+
+    if (!NVME_CAP_NSSRS(ldq_le_p(&n->bar.cap))) {
+        return;
+    }
+
+    if (data != 0x4e564d65) { /* magic value 'NVMe' */
+        /* The spec says that writes of other values have no effect */
+        return;
+    }
+
+    for (cntlid = 0; cntlid < ARRAY_SIZE(subsys->ctrls); cntlid++) {
+        ctrl = nvme_subsys_ctrl(n->subsys, cntlid);
+        if (!ctrl) {
+            continue;
+        }
+        /* ctrl_reset also clears CSTS.NSSRO as required to indicate a subsystem reset */
+        nvme_ctrl_reset(ctrl, NVME_RESET_CONTROLLER);
+    }
+
+    nvme_write_bar_pmrctl(n, 0);
+    return;
+}
+
 static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
                            unsigned size)
 {
@@ -7659,13 +7709,8 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         }
         break;
     case NVME_REG_NSSR:
-        if (data == 0x4e564d65) {
-            trace_pci_nvme_ub_mmiowr_ssreset_unsupported();
-        } else {
-            /* The spec says that writes of other values have no effect */
-            return;
-        }
-        break;
+        nvme_subsys_reset(n, data);
+        return;
     case NVME_REG_AQA:
         stl_le_p(&n->bar.aqa, data);
         trace_pci_nvme_mmio_aqattr(data & 0xffffffff);
@@ -7734,20 +7779,7 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
                        "invalid write to PMRCAP register, ignored");
         return;
     case NVME_REG_PMRCTL:
-        if (!NVME_CAP_PMRS(cap)) {
-            return;
-        }
-
-        stl_le_p(&n->bar.pmrctl, data);
-        if (NVME_PMRCTL_EN(data)) {
-            memory_region_set_enabled(&n->pmr.dev->mr, true);
-            pmrsts = 0;
-        } else {
-            memory_region_set_enabled(&n->pmr.dev->mr, false);
-            NVME_PMRSTS_SET_NRDY(pmrsts, 1);
-            n->pmr.cmse = false;
-        }
-        stl_le_p(&n->bar.pmrsts, pmrsts);
+        nvme_write_bar_pmrctl(n, data);
         return;
     case NVME_REG_PMRSTS:
         NVME_GUEST_ERR(pci_nvme_ub_mmiowr_pmrsts_readonly,
@@ -8541,6 +8573,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     NVME_CAP_SET_MQES(cap, 0x7ff);
     NVME_CAP_SET_CQR(cap, 1);
     NVME_CAP_SET_TO(cap, 0xf);
+    NVME_CAP_SET_NSSRS(cap, 1);
     NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_NVM);
     NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_CSI_SUPP);
     NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_ADMIN_ONLY);
