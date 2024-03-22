@@ -100,8 +100,13 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
     id_ns->eui64 = cpu_to_be64(ns->params.eui64);
     memcpy(&id_ns->nguid, &ns->params.nguid.data, sizeof(id_ns->nguid));
 
-    ds = 31 - clz32(ns->blkconf.logical_block_size);
-    ms = ns->params.ms;
+    if (ns->params.slm) {
+        ds = 0;
+        ms = 0;
+    } else {
+        ds = 31 - clz32(ns->blkconf.logical_block_size);
+        ms = ns->params.ms;
+    }
 
     id_ns->mc = NVME_ID_NS_MC_EXTENDED | NVME_ID_NS_MC_SEPARATE;
 
@@ -158,7 +163,18 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
 lbaf_found:
     id_ns_nvm->elbaf[i] = (ns->pif & 0x3) << 7;
     id_ns->nlbaf = ns->nlbaf - 1;
-    nvme_ns_init_format(ns);
+    if (ns->params.slm) {
+        int64_t nlbas;
+        ns->lbaf = id_ns->lbaf[NVME_ID_NS_FLBAS_INDEX(id_ns->flbas)];
+        ns->lbasz = 1 << ns->lbaf.ds;
+        nlbas = ns->size / (ns->lbasz + ns->lbaf.ms);
+        id_ns->nsze = cpu_to_le64(nlbas);
+        /* no thin provisioning */
+        id_ns->ncap = id_ns->nsze;
+        id_ns->nuse = id_ns->ncap;
+    } else {
+        nvme_ns_init_format(ns);
+    }
 
     ns->uncorrectable = bitmap_new(id_ns->nsze);
 
@@ -342,6 +358,33 @@ static void nvme_ns_init_zoned(NvmeNamespace *ns)
     }
 
     ns->id_ns_zoned = id_ns_z;
+}
+
+static void nvme_ns_init_slm(NvmeNamespace *ns)
+{
+    NvmeIdNsSLM *id_ns_slm = g_malloc0(sizeof(NvmeIdNsSLM));
+
+    ns->csi = NVME_CSI_SLM;
+    ns->id_ns_slm = id_ns_slm;
+
+    id_ns_slm->nsze = ns->size;
+
+    /* optimal write granularity in 2^n dwords */
+    id_ns_slm->nowg = 0;
+
+    static const NvmeSLMF slmf[16] = {
+        [0]  = { .ds =  0, .val = 1 },
+    };
+
+    id_ns_slm->nf = 0;
+
+    memcpy(&id_ns_slm->slmf, &slmf, sizeof(slmf));
+
+    ns->slm_buf = g_malloc0(id_ns_slm->nsze);
+
+    id_ns_slm->mssrl = cpu_to_le32(ns->params.slm_mssrl);
+    id_ns_slm->mcl = cpu_to_le64(ns->params.slm_mcl);
+    id_ns_slm->msrc = ns->params.slm_msrc;
 }
 
 static void nvme_clear_zone(NvmeNamespace *ns, NvmeZone *zone)
@@ -566,7 +609,7 @@ static int nvme_ns_check_constraints(NvmeNamespace *ns, Error **errp)
 {
     unsigned int pi_size;
 
-    if (!ns->blkconf.blk) {
+    if (!ns->blkconf.blk && !ns->params.slm) {
         error_setg(errp, "block backend not configured");
         return -1;
     }
@@ -678,8 +721,13 @@ int nvme_ns_setup(NvmeNamespace *ns, Error **errp)
         return -1;
     }
 
-    if (nvme_ns_init_blk(ns, errp)) {
-        return -1;
+    if (ns->params.slm) {
+        /* slm_size is in units of MBs */
+        ns->size = ns->params.slm_size * 1024 * 1024;
+    } else {
+        if (nvme_ns_init_blk(ns, errp)) {
+            return -1;
+        }
     }
 
     if (nvme_ns_init(ns, errp)) {
@@ -699,17 +747,30 @@ int nvme_ns_setup(NvmeNamespace *ns, Error **errp)
     }
 
     nvme_ns_init_kpios(ns);
+
+    if (ns->params.slm) {
+        nvme_ns_init_slm(ns);
+    }
     return 0;
 }
 
 void nvme_ns_drain(NvmeNamespace *ns)
 {
-    blk_drain(ns->blkconf.blk);
+    if (!(ns->params.slm)) {
+        blk_drain(ns->blkconf.blk);
+    }
 }
 
 void nvme_ns_shutdown(NvmeNamespace *ns)
 {
-    blk_flush(ns->blkconf.blk);
+    if (!(ns->params.slm)) {
+        blk_flush(ns->blkconf.blk);
+    }
+
+    if (ns->params.slm) {
+        g_free(ns->slm_buf);
+    }
+
     if (ns->params.zoned) {
         nvme_zoned_ns_shutdown(ns);
     }
@@ -718,6 +779,10 @@ void nvme_ns_shutdown(NvmeNamespace *ns)
 void nvme_ns_cleanup(NvmeNamespace *ns)
 {
     g_free(ns->uncorrectable);
+
+    if (ns->params.slm) {
+        g_free(ns->id_ns_slm);
+    }
 
     if (ns->params.zoned) {
         g_free(ns->id_ns_zoned);
@@ -829,6 +894,11 @@ static const Property nvme_ns_props[] = {
                       params.perm_wr_protect, false),
     DEFINE_PROP_BOOL("kpios", NvmeNamespace, params.kpios.enabled, false),
     DEFINE_PROP_UINT16("kpios.maxkt", NvmeNamespace, params.kpios.maxkt, 10),
+    DEFINE_PROP_BOOL("slm", NvmeNamespace, params.slm, false),
+    DEFINE_PROP_SIZE("slm.size", NvmeNamespace, params.slm_size, 0),
+    DEFINE_PROP_UINT64("slm.mcl", NvmeNamespace, params.slm_mcl, 0),
+    DEFINE_PROP_UINT32("slm.mssrl", NvmeNamespace, params.slm_mssrl, 0),
+    DEFINE_PROP_UINT8("slm.msrc", NvmeNamespace, params.slm_msrc, 0),
 };
 
 static void nvme_ns_class_init(ObjectClass *oc, const void *data)

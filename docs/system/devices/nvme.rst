@@ -376,3 +376,27 @@ controller are:
 .. code-block:: console
 
    echo 0000:01:00.1 > /sys/bus/pci/drivers/nvme/bind
+
+Subsystem Local Memory Namespaces
+---------------------------------
+A namespaces may be "Subsystem" Local Memory as defined by TP 4131 ("Subsystem Local Memory Command Set"). Set
+``slm=on`` on an ``nvme-ns`` device to configure it as a Subsystem Local Memory namespace.
+
+
+The namespace may be configured with additional parameters
+
+``slm.size=UINT32`` (default: ``0``)
+   Define the Subsystem Local Memory size in units of MiB.
+
+``slm.mcl=UINT64`` (default: ``0``)
+   Define the Subsystem Local Memory maximum number of bytes that may
+   be specified in a Memory Copy command.
+
+``slm.mssrl=UINT32`` (default: ``0``)
+  Define the Subsystem Local Memory maximum single source range length
+  in number of bytes that may be specified in a Memory Copy command in
+  units of bytes.
+
+``slm.msrc=UINT8`` (default: ``0``)
+  Define the Subsystem Local Memory maximum number of Source Range
+  entries that may be used to specify source data in a Memory Copy command.
