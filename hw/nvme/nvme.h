@@ -331,6 +331,11 @@ static inline size_t nvme_l2b(NvmeNamespace *ns, uint64_t lba)
     return lba << ns->lbaf.ds;
 }
 
+static inline size_t nvme_b2l(NvmeNamespace *ns, uint64_t lba)
+{
+    return lba >> ns->lbaf.ds;
+}
+
 static inline size_t nvme_m2b(NvmeNamespace *ns, uint64_t lba)
 {
     return ns->lbaf.ms * lba;

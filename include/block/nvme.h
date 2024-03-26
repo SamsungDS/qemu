@@ -946,6 +946,7 @@ enum {
     NVME_COPY_FORMAT_1 = 0x1,
     NVME_COPY_FORMAT_2 = 0x2,
     NVME_COPY_FORMAT_3 = 0x3,
+    NVME_COPY_FORMAT_4 = 0x4,
 };
 
 typedef struct QEMU_PACKED NvmeCopyCmd {
@@ -966,6 +967,32 @@ typedef struct QEMU_PACKED NvmeCopyCmd {
     uint16_t    apptag;
     uint16_t    appmask;
 } NvmeCopyCmd;
+
+#define SLM_MSSRL_LENGTH (256 * 1024 * 1024)
+#define DWORD_ALIGN_MASK (3)
+
+typedef struct QEMU_PACKED NvmeSLMCopyCmd {
+    uint8_t     opcode;
+    uint8_t     flags;
+    uint16_t    cid;
+    uint32_t    nsid;
+    uint32_t    cdw2;
+    uint32_t    cdw3;
+    uint32_t    rsvd2[2];
+    NvmeCmdDptr dptr;
+    uint64_t    starting_address;
+    uint8_t     nr;
+    uint8_t     desc_format:4;
+    uint8_t     rsvd12:4;
+    uint8_t     direc_type:4;
+    uint8_t     rsvd12a:4;
+    uint8_t     rsvd12b:2;
+    uint8_t     fua:1;
+    uint8_t     lr:1;
+    uint16_t    rsvd13;
+    uint16_t    dspec;
+    uint32_t    rsvd14[2];
+} NvmeSLMCopyCmd;
 
 typedef struct QEMU_PACKED NvmeCopySourceRangeFormat0_2 {
     uint32_t sparams;
@@ -993,6 +1020,19 @@ typedef struct QEMU_PACKED NvmeCopySourceRangeFormat1_3 {
     uint16_t apptag;
     uint16_t appmask;
 } NvmeCopySourceRangeFormat1_3;
+
+REG16(NVME_CPSR_SOPT_FMT4, 0x0)
+   FIELD(NVME_CPSR_SOPT_FMT4, FCO, 15, 1);
+
+typedef struct QEMU_PACKED NvmeCopySourceRangeFormat4 {
+    uint32_t snsid;
+    uint8_t  rsvd4[4];
+    uint64_t saddr;
+    uint32_t nbyte;
+    uint8_t  rsvd20[2];
+    uint16_t sopt;
+    uint8_t  rsvd24[8];
+} NvmeCopySourceRangeFormat4;
 
 enum NvmeAsyncEventRequest {
     NVME_AER_TYPE_ERROR                     = 0,
@@ -1502,6 +1542,7 @@ enum NvmeIdCtrlOcfs {
     NVME_OCFS_COPY_FORMAT_1 = 1 << NVME_COPY_FORMAT_1,
     NVME_OCFS_COPY_FORMAT_2 = 1 << NVME_COPY_FORMAT_2,
     NVME_OCFS_COPY_FORMAT_3 = 1 << NVME_COPY_FORMAT_3,
+    NVME_OCFS_COPY_FORMAT_4 = 1 << NVME_COPY_FORMAT_4,
 };
 
 enum NvmeIdctrlVwc {
