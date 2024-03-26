@@ -400,3 +400,31 @@ The namespace may be configured with additional parameters
 ``slm.msrc=UINT8`` (default: ``0``)
   Define the Subsystem Local Memory maximum number of Source Range
   entries that may be used to specify source data in a Memory Copy command.
+
+Reachability Architecture in Namespaces (TP 4156)
+-------------------------------------------------
+  Reachability Groups and Associations define the reachability
+  of the namespace to each other as per TP 4156. All namespace
+  will have one reachablity group id and multiple reachability
+  associations.
+
+``rgid=UINT32`` (default: ``0``)
+   Set the reachability group id this namespace belong to.
+
+``rasid=UINT32`` (default: ``0``)
+   Set the reachability association id this namespace belong to.
+
+``rasid1=UINT32`` (default: ``0``)
+   Set the reachability association id this namespace belong to.
+
+``rasid2=UINT32`` (default: ``0``)
+   Set the reachability association id this namespace belong to.
+
+``rasid3=UINT32`` (default: ``0``)
+   Set the reachability association id this namespace belong to.
+
+``rasid4=UINT32`` (default: ``0``)
+   Set the reachability association id this namespace belong to.
+
+``rasid5=UINT32`` (default: ``0``)
+   Set the reachability association id this namespace belong to.

@@ -1197,6 +1197,23 @@ enum NvmeSanitizeOpStatus {
     NVME_SANITIZE_OP_FAILED        = 3,
 };
 
+typedef struct QEMU_PACKED ReachabilityGroup_desc {
+    uint32_t rgid;
+    uint32_t num_nsid_val;
+    uint64_t chng_count;
+    uint8_t resv[16];
+    uint32_t nsid[0];
+} ReachabilityGroup_desc;
+
+typedef struct QEMU_PACKED ReachabilityAssociation_desc {
+    uint32_t rasid;
+    uint32_t nrid;
+    uint64_t chng_count;
+    uint8_t reachability_association_char;
+    uint8_t resv[15];
+    uint32_t rgid[0];
+} ReachabilityAssociation_desc;
+
 typedef struct QEMU_PACKED NvmeFwSlotInfoLog {
     uint8_t     afi;
     uint8_t     reserved1[7];
@@ -1330,6 +1347,22 @@ enum NvmeSmartWarn {
     NVME_SMART_PMR_UNRELIABLE         = 1 << 5,
 };
 
+typedef struct QEMU_PACKED MemoryRangeSetLog {
+    uint32_t numd;
+} MemoryRangeSetLog;
+
+typedef struct QEMU_PACKED ReachabilityGroupLog {
+    uint64_t chng_count;
+    uint16_t num_rg_desc;
+    uint8_t resv[6];
+} ReachabilityGroupLog;
+
+ typedef struct QEMU_PACKED ReachabilityAssociationLog {
+    uint64_t chng_count;
+    uint16_t nrad;
+    uint8_t resv[6];
+ } ReachabilityAssociationLog;
+
 typedef struct NvmeEffectsLog {
     uint32_t    acs[256];
     uint32_t    iocs[256];
@@ -1354,6 +1387,8 @@ enum NvmeLogIdentifier {
     NVME_LOG_CMD_EFFECTS                = 0x05,
     NVME_LOG_DEV_SELF_TEST              = 0x06,
     NVME_LOG_ENDGRP                     = 0x09,
+    NVME_LOG_REACHABILITY_GROUP         = 0x1A,
+    NVME_LOG_REACHABILITY_ASSOCIATION   = 0x1B,
     NVME_LOG_FDP_CONFS                  = 0x20,
     NVME_LOG_FDP_RUH_USAGE              = 0x21,
     NVME_LOG_FDP_STATS                  = 0x22,
@@ -1424,7 +1459,8 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint8_t     rsvd100[11];
     uint8_t     cntrltype;
     uint8_t     fguid[16];
-    uint8_t     rsvd128[128];
+    uint8_t     crcap;
+    uint8_t     rsvd128[127];
     uint16_t    oacs;
     uint8_t     acl;
     uint8_t     aerl;

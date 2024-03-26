@@ -114,6 +114,10 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
         id_ns->flbas |= NVME_ID_NS_FLBAS_EXTENDED;
     }
 
+    if (ns->params.rgid) {
+        ns->rgid = ns->params.rgid;
+    }
+
     id_ns->dpc = 0x1f;
     id_ns->dps = ns->params.pi;
     if (ns->params.pi && ns->params.pil) {
@@ -899,6 +903,13 @@ static const Property nvme_ns_props[] = {
     DEFINE_PROP_UINT64("slm.mcl", NvmeNamespace, params.slm_mcl, 0),
     DEFINE_PROP_UINT32("slm.mssrl", NvmeNamespace, params.slm_mssrl, 0),
     DEFINE_PROP_UINT8("slm.msrc", NvmeNamespace, params.slm_msrc, 0),
+    DEFINE_PROP_UINT32("rgid", NvmeNamespace, params.rgid, 0),
+    DEFINE_PROP_UINT32("rasid", NvmeNamespace, params.rasid[0], 0),
+    DEFINE_PROP_UINT32("rasid1", NvmeNamespace, params.rasid[1], 0),
+    DEFINE_PROP_UINT32("rasid2", NvmeNamespace, params.rasid[2], 0),
+    DEFINE_PROP_UINT32("rasid3", NvmeNamespace, params.rasid[3], 0),
+    DEFINE_PROP_UINT32("rasid4", NvmeNamespace, params.rasid[4], 0),
+    DEFINE_PROP_UINT32("rasid5", NvmeNamespace, params.rasid[5], 0),
 };
 
 static void nvme_ns_class_init(ObjectClass *oc, const void *data)

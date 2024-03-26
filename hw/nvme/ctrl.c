@@ -343,6 +343,7 @@ static const uint32_t nvme_cse_iocs_slm[256] = {
 static void nvme_process_sq(void *opaque);
 static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst);
 static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n);
+static void nvme_reachability_group_association(NvmeCtrl *n, NvmeNamespace *ns);
 
 static bool nvme_ns_kpios_enabled(NvmeNamespace *ns) {
     return ns->kpios & 0x1;
@@ -6385,6 +6386,145 @@ static uint16_t nvme_smart_info(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
     return nvme_c2h(n, (uint8_t *) &smart + off, trans_len, req);
 }
 
+static uint16_t  nvme_reachability_group(NvmeCtrl *n, uint8_t lsp, uint32_t len,
+                                         uint64_t off, NvmeRequest *req)
+{
+    uint8_t *get_log_buf = NULL;
+    uint32_t trans_len = 0;
+    NvmeReachabilityGroup *rg = NULL;
+    ReachabilityGroup_desc *desc = NULL;
+    ReachabilityGroupLog *rg_log = NULL;
+    uint32_t desc_count = 0;
+    uint32_t nsid_count = 0;
+    rg_ns *rgns_entry = NULL;
+    size_t buf_len = 0;
+    uint16_t status = 0;
+
+
+    for (int id = 1; id <= NVME_MAX_NAMESPACES; id++) {
+        if (n->rg[id]) {
+            desc_count++;
+            rg = n->rg[id];
+            nsid_count += rg->num_nsids;
+        }
+
+    }
+
+    buf_len  = (sizeof(ReachabilityGroupLog) +
+               (sizeof(ReachabilityGroup_desc) * desc_count) +
+                sizeof(uint32_t) * nsid_count);
+    get_log_buf = g_malloc0(buf_len);
+    memset(get_log_buf, 0, buf_len);
+    rg_log = (ReachabilityGroupLog *) get_log_buf;
+    rg_log->num_rg_desc = desc_count;
+    rg_log->chng_count = 0;
+    desc = (ReachabilityGroup_desc *) (get_log_buf +
+                sizeof(ReachabilityGroupLog));
+
+    for (int id = 1; id <= NVME_MAX_NAMESPACES; id++) {
+        if (n->rg[id]) {
+            rg = n->rg[id];
+            desc->rgid = id;
+            desc->num_nsid_val = rg->num_nsids;
+            /*
+             * Deviation from Spec for Reachability get log
+             *  in case of RGO (lsp) == 1
+             */
+            if (lsp == 1) {
+                desc =  (ReachabilityGroup_desc *)
+                        (((uint8_t *) desc) + sizeof(ReachabilityGroup_desc));
+            } else {
+                desc->chng_count = 0;
+                int desc_idx = 0;
+                QTAILQ_FOREACH(rgns_entry, &rg->rg_ns_list, entry) {
+                               desc->nsid[desc_idx] = rgns_entry->nsid;
+                    desc_idx++;
+                }
+
+                desc =  (ReachabilityGroup_desc *) (((uint8_t *) desc) +
+                         sizeof(ReachabilityGroup_desc) +
+                         (rg->num_nsids * sizeof(uint32_t)));
+            }
+
+        }
+
+    }
+
+    trans_len = MIN(buf_len, len);
+    status = nvme_c2h(n, (uint8_t *) get_log_buf , trans_len, req);
+    g_free(get_log_buf);
+    return status;
+
+}
+
+static uint16_t nvme_reachability_associations(NvmeCtrl *n, uint8_t lsp,
+                                               uint32_t len, uint64_t off,
+                                               NvmeRequest *req)
+{
+
+    NvmeReachabilityAssociation *ra = NULL;
+    ReachabilityAssociation_desc *desc_ = NULL;
+    ReachabilityAssociationLog  *ra_log = NULL;
+    uint32_t radesc_count = 0;
+    uint32_t rgid_count = 0;
+    ra_rg *rarg_entry = NULL;
+    uint8_t *buf = NULL;
+    uint32_t trans_len;
+    size_t buf_len = 0;
+    uint16_t status = 0;
+
+    for (int id = 1; id <= NVME_MAX_REACHABILITY_GROUP; id++) {
+        if (n->ra[id]) {
+            radesc_count++;
+            ra = n->ra[id];
+            rgid_count += ra->num_rgid;
+        }
+    }
+
+
+    buf_len = (sizeof(ReachabilityAssociationLog) +
+              (sizeof(ReachabilityAssociation_desc) * radesc_count) +
+               sizeof(uint32_t) * rgid_count);
+    buf = g_malloc0(buf_len);
+
+    memset(buf, 0, buf_len);
+    ra_log = (ReachabilityAssociationLog *) buf;
+    ra_log->nrad = radesc_count;
+    ra_log->chng_count = 0;
+    desc_ = (ReachabilityAssociation_desc *) (buf +
+             sizeof(ReachabilityAssociationLog));
+
+    for (int id = 1; id <= NVME_MAX_REACHABILITY_GROUP; id++) {
+        if (n->ra[id]) {
+            ra = n->ra[id];
+            desc_->rasid = id;
+            desc_->nrid = ra->num_rgid;
+            if (lsp == 1) {
+                desc_ =  (ReachabilityAssociation_desc *) (((uint8_t *) desc_)
+                                + sizeof(ReachabilityAssociation_desc));
+            } else {
+                desc_->chng_count = 0;
+                int idx = 0;
+                QTAILQ_FOREACH(rarg_entry, &ra->ra_rg_list, entry) {
+                    desc_->rgid[idx] = rarg_entry->rgid;
+                    idx++;
+                }
+
+                desc_ =  (ReachabilityAssociation_desc *) (((uint8_t *) desc_)
+                                + sizeof(ReachabilityAssociation_desc) +
+                                (ra->num_rgid * sizeof(uint32_t)));
+
+            }
+        }
+    }
+
+    trans_len = MIN(buf_len, len);
+    status = nvme_c2h(n, (uint8_t *) buf , trans_len, req);
+    g_free(buf);
+    return status;
+
+}
+
 static uint16_t nvme_endgrp_info(NvmeCtrl *n,  uint8_t rae, uint32_t buf_len,
                                  uint64_t off, NvmeRequest *req)
 {
@@ -6899,6 +7039,10 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
         return nvme_changed_nslist(n, rae, len, off, req);
     case NVME_LOG_CMD_EFFECTS:
         return nvme_cmd_effects(n, csi, len, off, req);
+    case NVME_LOG_REACHABILITY_GROUP:
+        return nvme_reachability_group(n, lsp, len, off, req);
+    case NVME_LOG_REACHABILITY_ASSOCIATION:
+        return nvme_reachability_associations(n, lsp, len, off, req);
     case NVME_LOG_ENDGRP:
         return nvme_endgrp_info(n, rae, len, off, req);
     case NVME_LOG_FDP_CONFS:
@@ -10875,6 +11019,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->oacs = cpu_to_le16(n->params.oacs);
     id->cntrltype = n->params.administrative ?
         NVME_CNTRL_TYPE_ADMIN : NVME_CNTRL_TYPE_IO;
+    id->crcap = 1;
 
     /*
      * Because the controller always completes the Abort command immediately,
@@ -11029,6 +11174,7 @@ void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns)
     uint32_t nsid = ns->params.nsid;
     assert(nsid && nsid <= NVME_MAX_NAMESPACES);
 
+    nvme_reachability_group_association(n, ns);
     n->namespaces[nsid] = ns;
     ns->attached++;
 }
@@ -11284,6 +11430,79 @@ static void nvme_set_smart_warning(Object *obj, Visitor *v, const char *name,
         event = 1 << index;
         if (value & ~old_value & event)
             nvme_smart_event(n, event);
+    }
+}
+
+static void nvme_reachability_group_association(NvmeCtrl *n, NvmeNamespace *ns)
+{
+
+    uint32_t nsid = ns->params.nsid;
+    NvmeReachabilityGroup *rg = NULL;
+    rg_ns *rgns_entry = NULL;
+    NvmeReachabilityAssociation *ra  = NULL;
+    ra_rg *rarg = NULL;
+    ra_rg *rarg_entry = NULL;
+    bool flag = false;
+    uint32_t rasid = 0;
+
+    assert(nsid && nsid <= NVME_MAX_NAMESPACES);
+
+    if (ns->params.rgid) {
+            rgns_entry = g_malloc0(sizeof(rg_ns));
+            memset(rgns_entry, 0, sizeof(rg_ns));
+            rgns_entry->nsid = nsid;
+            if (n->rg[ns->params.rgid]) {
+                rg = n->rg[ns->params.rgid];
+                rg->num_nsids++;
+                QTAILQ_INSERT_TAIL(&rg->rg_ns_list, rgns_entry, entry);
+            } else {
+                rg = g_malloc0(sizeof(NvmeReachabilityGroup));
+                memset(rg, 0, sizeof(NvmeReachabilityGroup));
+                rg->num_nsids++;
+                QTAILQ_INIT(&rg->rg_ns_list);
+                QTAILQ_INSERT_TAIL(&rg->rg_ns_list, rgns_entry, entry);
+                n->rg[ns->params.rgid] = rg;
+            }
+    }
+
+    for (int i = 0; i <  MAX_RA ; i++) {
+        rasid = 0;
+        rasid = ns->params.rasid[i];
+        if (rasid) {
+            if (n->ra[rasid]) {
+                ra = n->ra[rasid];
+                flag = false;
+                QTAILQ_FOREACH(rarg_entry, &ra->ra_rg_list, entry) {
+
+                    if (rarg_entry->rgid == ns->params.rgid) {
+                        flag = true;
+                    }
+
+                }
+
+                if (flag != true) {
+                    flag = false;
+                    rarg  = g_malloc0(sizeof(ra_rg));
+                    memset(rarg, 0, sizeof(ra_rg));
+                    rarg->rgid = ns->params.rgid;
+                    ra = n->ra[rasid];
+                    ra->num_rgid++;
+                    QTAILQ_INSERT_TAIL(&ra->ra_rg_list, rarg, entry);
+                }
+
+             } else {
+                 flag = false;
+                 rarg  = g_malloc0(sizeof(ra_rg));
+                 memset(rarg, 0, sizeof(ra_rg));
+                 rarg->rgid = ns->params.rgid;
+                 ra = g_malloc0(sizeof(NvmeReachabilityAssociation));
+                 memset(ra, 0, sizeof(NvmeReachabilityAssociation));
+                 ra->num_rgid++;
+                 QTAILQ_INIT(&ra->ra_rg_list);
+                 QTAILQ_INSERT_TAIL(&ra->ra_rg_list, rarg, entry);
+                 n->ra[rasid] = ra;
+             }
+        }
     }
 }
 
