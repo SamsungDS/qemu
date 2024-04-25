@@ -428,3 +428,29 @@ Reachability Architecture in Namespaces (TP 4156)
 
 ``rasid5=UINT32`` (default: ``0``)
    Set the reachability association id this namespace belong to.
+
+Computational Namespaces
+------------------------
+
+A namespaces may be "Compute" as defined by TP 4091 ("Computational Programs I/O Command Set"). Set
+``compute=on`` on an ``nvme-ns`` device to configure it as a compute namespace.
+
+The namespace may be configured with additional parameters
+
+``compute_size=UINT32`` (default: ``10``)
+  Define the compute size in units of MiB.
+
+``device_defined=BOOL`` (default: ``off``)
+  Set to ``on`` to add device defined program.
+
+``program_path=STRING`` (default: ``""``)
+  Provide system path for the the device defined program if device_defined is set to ``on``.
+
+``program_size=UINT32`` (default: ``0``)
+  Set the device defined program size in bytes within 1MiB.
+
+``temp_host_path=STRING`` (default: ``""``)
+  Provide system path for temporary storing of downloaded programs.
+
+``compute.program_size=SIZE`` (default: ``1*1024*1024``)
+  Define the maximum program size of each index in units of bytes.

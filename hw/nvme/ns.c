@@ -167,7 +167,7 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
 lbaf_found:
     id_ns_nvm->elbaf[i] = (ns->pif & 0x3) << 7;
     id_ns->nlbaf = ns->nlbaf - 1;
-    if (ns->params.slm) {
+    if (ns->params.slm || ns->params.compute) {
         int64_t nlbas;
         ns->lbaf = id_ns->lbaf[NVME_ID_NS_FLBAS_INDEX(id_ns->flbas)];
         ns->lbasz = 1 << ns->lbaf.ds;
@@ -443,6 +443,102 @@ static void nvme_zoned_ns_shutdown(NvmeNamespace *ns)
     assert(ns->nr_open_zones == 0);
 }
 
+static int nvme_ns_compute_check_calc_geometry(NvmeNamespace *ns, Error **errp)
+{
+    uint64_t program_size;
+
+    /* Make sure that the values of ZNS properties are sane */
+    if (ns->params.program_size) {
+        program_size = ns->params.program_size;
+    } else {
+        program_size = COMPUTE_DEFAULT_PROGRAM_SIZE;
+    }
+
+    /*
+     * Save the main compute geometry values to avoid
+     * calculating them later again.
+     */
+    ns->program_size = program_size;
+    ns->num_programs = le64_to_cpu(ns->size) / ns->program_size;
+
+    /* Do a few more sanity checks of compute properties */
+    if (!ns->num_programs) {
+        error_setg(errp,
+                   "insufficient drive capacity, must be at least the size "
+                   "of one zone (%"PRIu64"B)", program_size);
+        return -1;
+    }
+
+    return 0;
+}
+
+static void nvme_ns_compute_init_state(NvmeNamespace *ns)
+{
+    uint64_t start = 0, program_size = ns->program_size;
+    uint64_t capacity = ns->num_programs * program_size;
+    ComputeProgram *program;
+    DownloadableTypeDescrDS *prgm_type;
+    int i;
+
+    ns->compute_prgm_arr = g_new0(ComputeProgram, ns->num_programs);
+    program = ns->compute_prgm_arr;
+    for (i = 0; i < ns->num_programs; i++, program++) {
+        if (start + program_size > capacity) {
+            break;
+        }
+        program->pind = i;
+        program->sba = start;
+        start += program_size;
+    }
+
+    ns->down_prgm_type_list_cnt = 1;
+    ns->downloadable_type_list = g_new0(DownloadableTypeDescrDS,
+                                          ns->down_prgm_type_list_cnt);
+    prgm_type = ns->downloadable_type_list;
+    for (int j = 0; j < ns->down_prgm_type_list_cnt; j++, prgm_type++) {
+        prgm_type->ptype = 0xC0;
+        prgm_type->ver = 0;
+    }
+
+    if (ns->params.device_defined) {
+        char *program_path = ns->params.program_path;
+        program = &(ns->compute_prgm_arr[0]);
+        program->prgm_discr.peocc = 2;
+        program->prgm_discr.ptype = 193;
+        program->size = ns->params.prgm_size;
+
+        int fd = open(program_path, O_RDONLY, 00700);
+        if (fd < 0) {
+            printf("error opening file\n");
+            return;
+        }
+        ssize_t r_bytes = read(fd, (uint8_t *)&ns->compute_buf[0],
+                                                  ns->params.prgm_size);
+        if (r_bytes < 0) {
+            printf("error reading from file\n");
+            return;
+        }
+    }
+}
+
+static void nvme_ns_init_compute(NvmeNamespace *ns)
+{
+    NvmeIdNsCompute *id_ns_c = g_malloc0(sizeof(NvmeIdNsCompute));
+
+    ns->compute_buf = g_malloc0(ns->size);
+    nvme_ns_compute_init_state(ns);
+
+    id_ns_c->maxact = 0;
+    id_ns_c->maxmemrs = (uint8_t) MAXMEMRS;
+    id_ns_c->mrsg = 10;
+    id_ns_c->maxmemr = (uint8_t) MAXMEMR;
+    id_ns_c->maxpb = 0;
+    id_ns_c->lpg = 255;
+
+    ns->csi = NVME_CSI_COMPUTE;
+    ns->id_ns_compute = id_ns_c;
+}
+
 static NvmeRuHandle *nvme_find_ruh_by_attr(NvmeEnduranceGroup *endgrp,
                                            uint8_t ruha, uint16_t *ruhid)
 {
@@ -613,7 +709,7 @@ static int nvme_ns_check_constraints(NvmeNamespace *ns, Error **errp)
 {
     unsigned int pi_size;
 
-    if (!ns->blkconf.blk && !ns->params.slm) {
+    if (!ns->blkconf.blk && !ns->params.slm && !ns->params.compute) {
         error_setg(errp, "block backend not configured");
         return -1;
     }
@@ -728,6 +824,8 @@ int nvme_ns_setup(NvmeNamespace *ns, Error **errp)
     if (ns->params.slm) {
         /* slm_size is in units of MBs */
         ns->size = ns->params.slm_size * 1024 * 1024;
+    } else if (ns->params.compute) {
+        ns->size = ns->params.compute_size * 1024 * 1024;
     } else {
         if (nvme_ns_init_blk(ns, errp)) {
             return -1;
@@ -737,6 +835,7 @@ int nvme_ns_setup(NvmeNamespace *ns, Error **errp)
     if (nvme_ns_init(ns, errp)) {
         return -1;
     }
+
     if (ns->params.zoned) {
         if (nvme_ns_zoned_check_calc_geometry(ns, errp) != 0) {
             return -1;
@@ -755,26 +854,45 @@ int nvme_ns_setup(NvmeNamespace *ns, Error **errp)
     if (ns->params.slm) {
         nvme_ns_init_slm(ns);
     }
+
+    if (ns->params.compute) {
+        if (nvme_ns_compute_check_calc_geometry(ns, errp) != 0) {
+            return -1;
+        }
+        nvme_ns_init_compute(ns);
+    }
+
     return 0;
 }
 
 void nvme_ns_drain(NvmeNamespace *ns)
 {
-    if (!(ns->params.slm)) {
+    if (!(ns->params.slm || ns->params.compute)) {
         blk_drain(ns->blkconf.blk);
+    }
+    if (ns->params.compute) {
+        ComputeProgram *program = &(ns->compute_prgm_arr[0]);
+        uint8_t peocc = program->prgm_discr.peocc;
+        for (int i = 0; i < ns->num_programs; i++) {
+            if (peocc != 2) {
+                memset(&ns->compute_buf[program->sba], 0,
+                                       ns->params.program_size);
+            }
+        }
     }
 }
 
 void nvme_ns_shutdown(NvmeNamespace *ns)
 {
-    if (!(ns->params.slm)) {
+    if (!(ns->params.slm || ns->params.compute)) {
         blk_flush(ns->blkconf.blk);
     }
-
     if (ns->params.slm) {
         g_free(ns->slm_buf);
     }
-
+    if (ns->params.compute) {
+        g_free(ns->compute_buf);
+    }
     if (ns->params.zoned) {
         nvme_zoned_ns_shutdown(ns);
     }
@@ -786,6 +904,10 @@ void nvme_ns_cleanup(NvmeNamespace *ns)
 
     if (ns->params.slm) {
         g_free(ns->id_ns_slm);
+    }
+
+    if (ns->params.compute) {
+        g_free(ns->id_ns_compute);
     }
 
     if (ns->params.zoned) {
@@ -903,6 +1025,9 @@ static const Property nvme_ns_props[] = {
     DEFINE_PROP_UINT64("slm.mcl", NvmeNamespace, params.slm_mcl, 0),
     DEFINE_PROP_UINT32("slm.mssrl", NvmeNamespace, params.slm_mssrl, 0),
     DEFINE_PROP_UINT8("slm.msrc", NvmeNamespace, params.slm_msrc, 0),
+    DEFINE_PROP_BOOL("compute", NvmeNamespace, params.compute, false),
+    DEFINE_PROP_SIZE("compute.program_size", NvmeNamespace, params.program_size,
+                     COMPUTE_DEFAULT_PROGRAM_SIZE),
     DEFINE_PROP_UINT32("rgid", NvmeNamespace, params.rgid, 0),
     DEFINE_PROP_UINT32("rasid", NvmeNamespace, params.rasid[0], 0),
     DEFINE_PROP_UINT32("rasid1", NvmeNamespace, params.rasid[1], 0),
@@ -910,6 +1035,12 @@ static const Property nvme_ns_props[] = {
     DEFINE_PROP_UINT32("rasid3", NvmeNamespace, params.rasid[3], 0),
     DEFINE_PROP_UINT32("rasid4", NvmeNamespace, params.rasid[4], 0),
     DEFINE_PROP_UINT32("rasid5", NvmeNamespace, params.rasid[5], 0),
+    DEFINE_PROP_BOOL("device_defined", NvmeNamespace, params.device_defined,
+                     false),
+    DEFINE_PROP_STRING("program_path", NvmeNamespace, params.program_path),
+    DEFINE_PROP_STRING("temp_host_path", NvmeNamespace, params.host_temp_path),
+    DEFINE_PROP_UINT32("program_size", NvmeNamespace, params.prgm_size, 0),
+    DEFINE_PROP_UINT32("compute_size", NvmeNamespace, params.compute_size, 10),
 };
 
 static void nvme_ns_class_init(ObjectClass *oc, const void *data)
