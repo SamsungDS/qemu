@@ -312,6 +312,9 @@ static const uint32_t nvme_cse_iocs_zoned_default[256] = {
 static void nvme_process_sq(void *opaque);
 static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst);
 static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n);
+static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
+                               uint8_t event_info, uint8_t log_page,
+                               uint32_t evntsp);
 
 static uint16_t nvme_sqid(NvmeRequest *req)
 {
@@ -1596,6 +1599,7 @@ static void nvme_process_aers(void *opaque)
         result->event_type = event->result.event_type;
         result->event_info = event->result.event_info;
         result->log_page = event->result.log_page;
+        req->cqe.dw1 = event->evntsp;
         g_free(event);
 
         trace_pci_nvme_aer_post_cqe(result->event_type, result->event_info,
@@ -1606,7 +1610,8 @@ static void nvme_process_aers(void *opaque)
 }
 
 static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
-                               uint8_t event_info, uint8_t log_page)
+                               uint8_t event_info, uint8_t log_page,
+                               uint32_t evntsp)
 {
     NvmeAsyncEvent *event;
 
@@ -1618,6 +1623,7 @@ static void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
     }
 
     event = g_new(NvmeAsyncEvent, 1);
+    event->evntsp = evntsp;
     event->result = (NvmeAerResult) {
         .event_type = event_type,
         .event_info = event_info,
@@ -1656,7 +1662,7 @@ static void nvme_smart_event(NvmeCtrl *n, uint8_t event)
         return;
     }
 
-    nvme_enqueue_event(n, NVME_AER_TYPE_SMART, aer_info, NVME_LOG_SMART_INFO);
+    nvme_enqueue_event(n, NVME_AER_TYPE_SMART, aer_info, NVME_LOG_SMART_INFO, 0);
 }
 
 static void nvme_clear_events(NvmeCtrl *n, uint8_t event_type)
@@ -6866,7 +6872,7 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
         if (!test_and_set_bit(nsid, ctrl->changed_nsids)) {
             nvme_enqueue_event(ctrl, NVME_AER_TYPE_NOTICE,
                                NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED,
-                               NVME_LOG_CHANGED_NSLIST);
+                               NVME_LOG_CHANGED_NSLIST, 0);
         }
     }
 
@@ -8237,7 +8243,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             if (n->outstanding_aers) {
                 nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
                                    NVME_AER_INFO_ERR_INVALID_DB_REGISTER,
-                                   NVME_LOG_ERROR_INFO);
+                                   NVME_LOG_ERROR_INFO, 0);
             }
 
             return;
@@ -8254,7 +8260,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             if (n->outstanding_aers) {
                 nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
                                    NVME_AER_INFO_ERR_INVALID_DB_VALUE,
-                                   NVME_LOG_ERROR_INFO);
+                                   NVME_LOG_ERROR_INFO, 0);
             }
 
             return;
@@ -8295,7 +8301,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             if (n->outstanding_aers) {
                 nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
                                    NVME_AER_INFO_ERR_INVALID_DB_REGISTER,
-                                   NVME_LOG_ERROR_INFO);
+                                   NVME_LOG_ERROR_INFO, 0);
             }
 
             return;
@@ -8312,7 +8318,7 @@ static void nvme_process_db(NvmeCtrl *n, hwaddr addr, int val)
             if (n->outstanding_aers) {
                 nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
                                    NVME_AER_INFO_ERR_INVALID_DB_VALUE,
-                                   NVME_LOG_ERROR_INFO);
+                                   NVME_LOG_ERROR_INFO, 0);
             }
 
             return;

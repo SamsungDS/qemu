@@ -398,6 +398,7 @@ void nvme_ns_cleanup(NvmeNamespace *ns);
 typedef struct NvmeAsyncEvent {
     QTAILQ_ENTRY(NvmeAsyncEvent) entry;
     NvmeAerResult result;
+    uint32_t      evntsp;
 } NvmeAsyncEvent;
 
 enum {
