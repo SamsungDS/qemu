@@ -4685,8 +4685,9 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
     NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(req->cmd.nsid);
 
-    trace_pci_nvme_io_cmd(nvme_cid(req), nsid, nvme_sqid(req),
-                          req->cmd.opcode, nvme_io_opc_str(req->cmd.opcode));
+    trace_pci_nvme_io_cmd(n->params.serial, n->cntlid, nvme_cid(req), nsid,
+                          nvme_sqid(req), req->cmd.opcode,
+                          nvme_io_opc_str(req->cmd.opcode));
 
     /*
      * In the base NVM command set, Flush may apply to all namespaces
@@ -4875,6 +4876,8 @@ static void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
 {
     int i;
     NvmeCQueue *cq;
+
+    trace_pci_nvme_init_sq(n->cntlid, dma_addr, sqid, cqid, size);
 
     sq->ctrl = n;
     sq->dma_addr = dma_addr;
@@ -5577,6 +5580,9 @@ static void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
                          uint16_t irq_enabled)
 {
     PCIDevice *pci = PCI_DEVICE(n);
+
+    trace_pci_nvme_init_cq(n->cntlid, dma_addr, cqid, vector, size,
+                           irq_enabled);
 
     if (msix_enabled(pci) && irq_enabled) {
         msix_vector_use(pci, vector);
@@ -7464,7 +7470,8 @@ out:
 
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
 {
-    trace_pci_nvme_admin_cmd(nvme_cid(req), nvme_sqid(req), req->cmd.opcode,
+    trace_pci_nvme_admin_cmd(n->params.serial, n->cntlid, nvme_cid(req),
+                             nvme_sqid(req), req->cmd.opcode,
                              nvme_adm_opc_str(req->cmd.opcode));
 
     if (!(n->cse.acs[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
@@ -8161,7 +8168,7 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
     NvmeCtrl *n = (NvmeCtrl *)opaque;
     uint8_t *ptr = (uint8_t *)&n->bar;
 
-    trace_pci_nvme_mmio_read(addr, size);
+    trace_pci_nvme_mmio_read(n->params.serial, n->cntlid, addr, size);
 
     if (unlikely(addr & (sizeof(uint32_t) - 1))) {
         NVME_GUEST_ERR(pci_nvme_ub_mmiord_misaligned32,
@@ -8353,7 +8360,7 @@ static void nvme_mmio_write(void *opaque, hwaddr addr, uint64_t data,
 {
     NvmeCtrl *n = (NvmeCtrl *)opaque;
 
-    trace_pci_nvme_mmio_write(addr, data, size);
+    trace_pci_nvme_mmio_write(n->params.serial, n->cntlid, addr, data, size);
 
     if (pci_is_vf(PCI_DEVICE(n)) && !nvme_sctrl(n)->scs &&
         addr != NVME_REG_CSTS) {
