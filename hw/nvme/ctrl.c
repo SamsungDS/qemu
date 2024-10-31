@@ -282,6 +282,7 @@ static const uint32_t nvme_cse_acs_default[256] = {
     [NVME_ADM_CMD_FORMAT_NVM]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_ADM_CMD_DIRECTIVE_RECV]   = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_DIRECTIVE_SEND]   = NVME_CMD_EFF_CSUPP,
+    [NVME_ADM_CMD_GET_LBA_STATUS]   = NVME_CMD_EFF_CSUPP,
 };
 
 #define NVME_CSE_IOCS_NVM_DEFAULT \
@@ -2562,6 +2563,18 @@ done:
     nvme_dsm_cb(iocb, ret);
 }
 
+static void nvme_dsm_cb_lbaag_clear(NvmeNamespace *ns,
+                                    uint64_t slba, uint64_t nlb)
+{
+    uint64_t start_bit = slba / ns->params.lbaag;
+    uint64_t nlbaag = 0;
+    uint64_t waste = QEMU_ALIGN_UP(slba, ns->params.lbaag) - slba;
+    if (waste < nlb) {
+        nlbaag = (nlb - waste) / ns->params.lbaag;
+    }
+    bitmap_clear(ns->lbaag_map, start_bit, nlbaag);
+}
+
 static void nvme_dsm_cb(void *opaque, int ret)
 {
     NvmeDSMAIOCB *iocb = opaque;
@@ -2599,6 +2612,10 @@ next:
         trace_pci_nvme_err_invalid_lba_range(slba, nlb,
                                              ns->id_ns.nsze);
         goto next;
+    }
+
+    if (ns->params.lbaag) {
+        nvme_dsm_cb_lbaag_clear(ns, slba, nlb);
     }
 
     iocb->aiocb = blk_aio_pdiscard(ns->blkconf.blk, nvme_l2b(ns, slba),
@@ -3814,6 +3831,11 @@ static uint16_t nvme_do_write(NvmeCtrl *n, NvmeRequest *req, bool append,
         }
     } else if (ns->endgrp && ns->endgrp->fdp.enabled) {
         nvme_do_write_fdp(n, req, slba, nlb);
+    }
+
+    if (ns->params.lbaag) {
+        bitmap_set(ns->lbaag_map, slba / ns->params.lbaag,
+                   DIV_ROUND_UP(nlb, ns->params.lbaag));
     }
 
     data_offset = nvme_l2b(ns, slba);
@@ -7327,6 +7349,113 @@ static uint16_t nvme_directive_receive(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
+static uint16_t nvme_get_lba_status(NvmeCtrl *n, NvmeRequest *req)
+{
+    NvmeNamespace *ns;
+
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+    uint32_t dw10 = le32_to_cpu(req->cmd.cdw10);
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+    uint32_t dw12 = le32_to_cpu(req->cmd.cdw12);
+    uint32_t dw13 = le32_to_cpu(req->cmd.cdw13);
+
+    uint64_t slba = ((uint64_t)dw11 << 32) | dw10;
+    uint64_t rl = dw13 & 0xffff;
+    uint8_t atype = (dw13 >> 24) & 0xff;
+
+    size_t len = (dw12 + 1) << 2;
+    uint16_t status;
+
+    bool open = false;
+    NvmeLBAStatusDescriptorList *list = NULL;
+    NvmeLBAStatusDescriptor *descr = NULL;
+
+    g_autofree uint8_t *buf = NULL;
+    int nlsd = 0, nlsd_max = 0;
+    uint64_t granule, start_bit, end_bit;
+
+    status = nvme_check_mdts(n, len);
+    if (status) {
+        return status;
+    }
+
+    if (!nvme_nsid_valid(n, nsid)) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+
+    ns = nvme_ns(n, nsid);
+    if (!ns) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (atype != NVME_GET_LBA_STATUS_ATYPE_ALLOCATED) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (slba >= ns->id_ns.nsze) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if (len >= sizeof(*list)) {
+        nlsd_max = (len - sizeof(*list)) / sizeof(*descr);
+    }
+
+    if (nlsd_max == 0) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    buf = g_malloc0(sizeof(*list) + nlsd_max * sizeof(*descr));
+
+    list = (NvmeLBAStatusDescriptorList *)buf;
+    descr = (NvmeLBAStatusDescriptor *)(buf + sizeof(*list));
+
+    list->cmpc = NVME_GET_LBA_STATUS_CMPC_COMPLETE;
+
+    if (ns->params.lbaag == 0) {
+        goto out;
+    }
+
+    if (rl == 0) {
+        /* rl == 0 implies all remaining LBAs */
+        rl = le64_to_cpu(ns->id_ns.nsze) - slba - 1;
+    }
+
+    start_bit = slba / ns->params.lbaag;
+    end_bit = (slba + rl) / ns->params.lbaag;
+
+    open = false;
+
+    for (granule = start_bit; granule <= end_bit; granule++) {
+        bool allocated = test_bit(granule, ns->lbaag_map);
+
+        if (open && !allocated) {
+            descr->nlb = (granule * ns->params.lbaag) - descr->dslba - 1;
+            descr++;
+            open = false;
+        } else if (!open && allocated) {
+            if (nlsd == nlsd_max) {
+                list->cmpc = NVME_GET_LBA_STATUS_CMPC_INCOMPLETE;
+                break;
+            }
+
+            descr->dslba = granule * ns->params.lbaag;
+            descr->status = NVME_LBA_STATUS_ALLOCATED;
+
+            nlsd++;
+            open = true;
+        }
+    }
+
+    if (open) {
+        descr->nlb = (granule * ns->params.lbaag) - descr->dslba - 1;
+    }
+
+out:
+    list->nlsd = cpu_to_le32(nlsd);
+
+    return nvme_c2h(n, buf, sizeof(*list) + nlsd * sizeof(*descr), req);
+}
+
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
 {
     trace_pci_nvme_admin_cmd(nvme_cid(req), nvme_sqid(req), req->cmd.opcode,
@@ -7379,6 +7508,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
         return nvme_directive_send(n, req);
     case NVME_ADM_CMD_DIRECTIVE_RECV:
         return nvme_directive_receive(n, req);
+    case NVME_ADM_CMD_GET_LBA_STATUS:
+        return nvme_get_lba_status(n, req);
     default:
         g_assert_not_reached();
     }
@@ -8798,7 +8929,8 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->mdts = n->params.mdts;
     id->ver = cpu_to_le32(NVME_SPEC_VER);
 
-    oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DIRECTIVES;
+    oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DIRECTIVES |
+        NVME_OACS_GLSS;
 
     if (n->params.dbcs) {
         oacs |= NVME_OACS_DBCS;

@@ -218,6 +218,7 @@ typedef struct NvmeNamespaceParams {
     struct {
         char *ruhs;
     } fdp;
+    uint32_t lbaag;
 } NvmeNamespaceParams;
 
 typedef struct NvmeAtomic {
@@ -277,6 +278,8 @@ typedef struct NvmeNamespace {
         /* reclaim unit handle identifiers indexed by placement handle */
         uint16_t *phs;
     } fdp;
+    unsigned long *lbaag_map;
+    unsigned long lbaag_longs;
 } NvmeNamespace;
 
 static inline uint32_t nvme_nsid(NvmeNamespace *ns)
@@ -458,6 +461,7 @@ static inline const char *nvme_adm_opc_str(uint8_t opc)
     case NVME_ADM_CMD_DIRECTIVE_RECV:   return "NVME_ADM_CMD_DIRECTIVE_RECV";
     case NVME_ADM_CMD_DBBUF_CONFIG:     return "NVME_ADM_CMD_DBBUF_CONFIG";
     case NVME_ADM_CMD_FORMAT_NVM:       return "NVME_ADM_CMD_FORMAT_NVM";
+    case NVME_ADM_CMD_GET_LBA_STATUS:   return "NVME_ADM_CMD_GET_LBA_STATUS";
     default:                            return "NVME_ADM_CMD_UNKNOWN";
     }
 }
