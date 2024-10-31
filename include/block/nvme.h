@@ -618,6 +618,11 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_DIRECTIVE_SEND = 0x19,
     NVME_ADM_CMD_VIRT_MNGMT     = 0x1c,
     NVME_ADM_CMD_DIRECTIVE_RECV = 0x1a,
+    NVME_ADM_CMD_TRACK_SEND     = 0x3D,
+    NVME_ADM_CMD_TRACK_RECV     = 0x3E,
+    NVME_ADM_CMD_MIGR_SEND      = 0x41,
+    NVME_ADM_CMD_MIGR_RECV      = 0x42,
+    NVME_ADM_CMD_CDQ            = 0x45,
     NVME_ADM_CMD_DBBUF_CONFIG   = 0x7c,
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
     NVME_ADM_CMD_SECURITY_SEND  = 0x81,
@@ -865,6 +870,8 @@ enum NvmeAsyncEventRequest {
     NVME_AER_INFO_SMART_TEMP_THRESH         = 1,
     NVME_AER_INFO_SMART_SPARE_THRESH        = 2,
     NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED    = 0,
+    NVME_AER_INFO_CDQ_TPT                   = 0,
+    NVME_AER_INFO_CDQ_FULL                  = 1,
 };
 
 typedef struct QEMU_PACKED NvmeAerResult {
@@ -945,6 +952,11 @@ enum NvmeStatusCodes {
     NVME_IOCS_NOT_ENABLED       = 0x012a,
     NVME_IOCS_COMBINATION_REJECTED = 0x012b,
     NVME_INVALID_IOCS           = 0x012c,
+    NVME_INVALID_CDQ            = 0x0137,
+    NVME_NOT_ENOUGH_RESOURCES   = 0x0138,
+    NVME_CTRL_SUSPENDED         = 0x0139,
+    NVME_CTRL_NOT_SUSPENDED     = 0x013a,
+    NVME_CDQ_FULL               = 0x013b,
     NVME_CONFLICTING_ATTRS      = 0x0180,
     NVME_INVALID_PROT_INFO      = 0x0181,
     NVME_WRITE_TO_RO            = 0x0182,
@@ -1134,7 +1146,13 @@ enum NvmeIdCns {
     NVME_ID_CNS_CS_NS_PRESENT         = 0x1b,
     NVME_ID_CNS_IO_COMMAND_SET        = 0x1c,
     NVME_ID_CNS_CS_IND_NS_ALLOCATED   = 0x1f,
+    NVME_ID_CNS_CTRL_STATE_FMTS       = 0x20,
 };
+
+REG8(TRATTR, 0x0)
+    FIELD(TRATTR, THMCS, 0, 1)
+    FIELD(TRATTR, TUDCS, 1, 1)
+    FIELD(TRATTR, MRTLL, 2, 1);
 
 typedef struct QEMU_PACKED NvmeIdCtrl {
     uint16_t    vid;
@@ -1200,7 +1218,19 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint16_t    acwu;
     uint16_t    ocfs;
     uint32_t    sgls;
-    uint8_t     rsvd540[228];
+    uint8_t     rsvd540[30];
+    uint16_t    cmmrtd;
+    uint16_t    nmmrtd;
+    uint8_t     minmrtg;
+    uint8_t     maxmrtg;
+    uint8_t     trattr;
+    uint8_t     rsvd577;
+    uint16_t    mcudmq;
+    uint16_t    mnsudmq;
+    uint16_t    mcmr;
+    uint16_t    nmcmr;
+    uint16_t    mcdqpc;
+    uint8_t     rsvd588[180];
     uint8_t     subnqn[256];
     uint8_t     rsvd1024[1024];
     NvmePSD     psd[32];
@@ -1221,8 +1251,14 @@ typedef struct NvmeIdCtrlNvm {
     uint8_t     dmrl;
     uint32_t    dmrsl;
     uint64_t    dmsl;
-    uint8_t     rsvd16[4080];
+    uint8_t     rsvd16[2];
+    uint16_t    aocs;
+    uint8_t     rsvd20[4076];
 } NvmeIdCtrlNvm;
+
+enum NvmeIdctrlNvmAocs {
+    NVME_NVM_AOCS_RALBAS = 1 << 0,
+};
 
 enum NvmeIdCtrlOaes {
     NVME_OAES_NS_ATTR   = 1 << 8,
@@ -1244,6 +1280,7 @@ enum NvmeIdCtrlOacs {
     NVME_OACS_VMS           = 1 << 7,
     NVME_OACS_DBCS          = 1 << 8,
     NVME_OACS_GLSS          = 1 << 9,
+    NVME_OACS_HMLMS         = 1 << 11,
 };
 
 enum NvmeIdCtrlOncs {
@@ -1356,6 +1393,7 @@ enum NvmeFeatureIds {
     NVME_COMMAND_SET_PROFILE        = 0x19,
     NVME_FDP_MODE                   = 0x1d,
     NVME_FDP_EVENTS                 = 0x1e,
+    NVME_CTRL_DATA_QUEUE            = 0x21,
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_FID_MAX                    = 0x100,
 };
@@ -1465,7 +1503,8 @@ typedef struct QEMU_PACKED NvmeIdNs {
 typedef struct QEMU_PACKED NvmeIdNsNvm {
     uint64_t    lbstm;
     uint8_t     pic;
-    uint8_t     rsvd9[3];
+    uint8_t     lbamqf;
+    uint8_t     rsvd10[2];
     uint32_t    elbaf[NVME_MAX_NLBAF];
     uint32_t    npdgl;
     uint32_t    nprg;
@@ -1948,6 +1987,80 @@ typedef struct QEMU_PACKED NvmeLBAStatusDescriptorList {
     uint8_t rsvd5[3];
 } NvmeLBAStatusDescriptorList;
 
+#define NVME_MGR_QTYPE_MAX ((uint8_t)255)
+#define NVME_MGR_QTYPE_UDMQ ((uint8_t)0)
+
+enum NvmeUdfEsa {
+    NVME_UDF_ESA_MIDDLE       = 0,
+    NVME_UDF_ESA_FIRST        = 1,
+    NVME_UDF_ESA_LAST_STOP    = 2,
+    NVME_UDF_ESA_LAST_SUSPEND = 3,
+    NVME_UDF_ESA_LAST_FULL    = 7,
+};
+
+REG8(NVME_MQUDF0_ATTRS, 0x0)
+    FIELD(NVME_MQUDF0_ATTRS, CDQP, 0, 1)
+    FIELD(NVME_MQUDF0_ATTRS, ESA, 1, 3)
+    FIELD(NVME_MQUDF0_ATTRS, DLBA, 5, 1)
+    FIELD(NVME_MQUDF0_ATTRS, LBACIA, 6, 2);
+
+enum lba_cia {
+    NVME_LBACIA_CH_RANGE = 0,
+    NVME_LBACIA_CH_NS    = 1,
+    NVME_LBACIA_CH_NONE  = 2,
+};
+
+typedef struct QEMU_PACKED NvmeMqUdf0 {
+    uint32_t nsid;
+    uint32_t nlb;
+    uint64_t slba;
+    uint8_t  rsvd16[15];
+    uint8_t  lbamqa;
+} NvmeMqUdf0;
+
+typedef struct QEMU_PACKED NvmeCtrlStateHeader {
+    uint16_t version;
+    uint8_t  csa;
+    uint8_t  rsvd3[13];
+    uint64_t  nvmecss[2];
+    uint8_t  vss[16];
+} NvmeCtrlStateHeader;
+
+typedef struct QEMU_PACKED NvmeCtrlState {
+    uint16_t version;
+    uint16_t niosq;
+    uint16_t niocq;
+    uint8_t  rsvd6[2];
+    /* niosq * NvmeIOSQState */
+    /* niocq * NvmeIOCQState */
+} NvmeCtrlState;
+
+typedef struct QEMU_PACKED NvmeIOSQState {
+    uint64_t prp1;
+    uint16_t size;
+    uint16_t qid;
+    uint16_t cqid;
+    uint16_t attrs;
+    uint16_t head;
+    uint16_t tail;
+    uint8_t  rsvd20[4];
+} NvmeIOSQState;
+
+typedef struct QEMU_PACKED NvmeIOCQState {
+    uint64_t prp1;
+    uint16_t size;
+    uint16_t qid;
+    uint16_t head;
+    uint16_t tail;
+    uint32_t attrs;
+    uint8_t  rsvd20[4];
+} NvmeIOCQState;
+
+typedef union QEMU_PACKED NvmeIOQState {
+    NvmeIOSQState iosq;
+    NvmeIOCQState iocq;
+} NvmeIOQState;
+
 static inline void _nvme_check_size(void)
 {
     QEMU_BUILD_BUG_ON(sizeof(NvmeBar) != 4096);
@@ -1992,5 +2105,11 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeDirectiveIdentify) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeLBAStatusDescriptor) != 16);
     QEMU_BUILD_BUG_ON(sizeof(NvmeLBAStatusDescriptorList) != 8);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeMqUdf0) != 32);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeCtrlStateHeader) != 48);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeCtrlState) != 8);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeIOSQState) != 24);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeIOCQState) != 24);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeIOQState) != 24);
 }
 #endif
