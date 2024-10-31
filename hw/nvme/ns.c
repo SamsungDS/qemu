@@ -114,6 +114,11 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
 
     ns->pif = ns->params.pif;
 
+    if (!ns->params.zoned) {
+        /* host-managed live migration: CS defines FMT to use. */
+        id_ns_nvm->lbamqf = 0x1;
+    }
+
     static const NvmeLBAF defaults[16] = {
         [0] = { .ds =  9           },
         [1] = { .ds =  9, .ms =  8 },

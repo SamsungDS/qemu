@@ -29,6 +29,8 @@
 #define NVME_EUI64_DEFAULT ((uint64_t)0x5254000000000000)
 #define NVME_FDP_MAX_EVENTS 63
 #define NVME_FDP_MAXPIDS 128
+#define NVME_MGR_QTYPE_MAX ((uint8_t)255)
+#define NVME_MGR_MAX_CDQS 100
 
 /*
  * The controller only supports Submission and Completion Queue Entry Sizes of
@@ -460,6 +462,11 @@ static inline const char *nvme_adm_opc_str(uint8_t opc)
     case NVME_ADM_CMD_DIRECTIVE_SEND:   return "NVME_ADM_CMD_DIRECTIVE_SEND";
     case NVME_ADM_CMD_VIRT_MNGMT:       return "NVME_ADM_CMD_VIRT_MNGMT";
     case NVME_ADM_CMD_DIRECTIVE_RECV:   return "NVME_ADM_CMD_DIRECTIVE_RECV";
+    case NVME_ADM_CMD_TRACK_SEND:       return "NVME_ADM_CMD_TRACK_SEND";
+    case NVME_ADM_CMD_TRACK_RECV:       return "NVME_ADM_CMD_TRACK_RECV";
+    case NVME_ADM_CMD_MIGR_SEND:        return "NVME_ADM_CMD_MIGR_SEND";
+    case NVME_ADM_CMD_MIGR_RECV:        return "NVME_ADM_CMD_MIGR_RECV";
+    case NVME_ADM_CMD_CDQ:              return "NVME_ADM_CMD_CDQ";
     case NVME_ADM_CMD_DBBUF_CONFIG:     return "NVME_ADM_CMD_DBBUF_CONFIG";
     case NVME_ADM_CMD_FORMAT_NVM:       return "NVME_ADM_CMD_FORMAT_NVM";
     case NVME_ADM_CMD_GET_LBA_STATUS:   return "NVME_ADM_CMD_GET_LBA_STATUS";
@@ -484,6 +491,25 @@ static inline const char *nvme_io_opc_str(uint8_t opc)
     default:                        return "NVME_NVM_CMD_UNKNOWN";
     }
 }
+
+typedef struct NvmeCDQ {
+    uint32_t len;
+    uint32_t head;
+    uint32_t tail;
+    uint8_t phase;
+    size_t entry_size;
+    bool pc;
+    union {
+        dma_addr_t addr;
+        dma_addr_t prplst;
+    } dptr;
+    uint32_t tpt;
+    bool etpt;
+    struct {
+        NvmeCtrl *n;
+        uint16_t cdqid;
+    } mmc;
+} NvmeCDQ;
 
 typedef struct NvmeSQueue {
     struct NvmeCtrl *ctrl;
@@ -559,7 +585,26 @@ typedef struct NvmeParams {
     uint16_t atomic_awun;
     uint16_t atomic_awupf;
     bool     atomic_dn;
+
+    bool     hmlms;
 } NvmeParams;
+
+typedef enum NvmeCtrlCmdState {
+    NVME_CTRL_STATE_ACTIVE     = 0,
+    NVME_CTRL_STATE_SUSPENDING = 1,
+    NVME_CTRL_STATE_SUSPENDED  = 3,
+} NvmeCtrlCmdState;
+
+typedef struct NvmeSuspendRq {
+    NvmeRequest *req;
+    bool dudmq;
+    QTAILQ_ENTRY(NvmeSuspendRq)entry;
+} NvmeSuspendRq;
+
+typedef struct NvmeCDQRef {
+    NvmeCDQ *cdq;
+    NvmeCtrl *mc;
+} NvmeCDQRef;
 
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;
@@ -650,6 +695,26 @@ typedef struct NvmeCtrl {
     } next_pri_ctrl_cap;    /* These override pri_ctrl_cap after reset */
     uint32_t    dn; /* Disable Normal */
     NvmeAtomic  atomic;
+
+    struct {
+        /* For migratable ctrls (MC), assume 1 queue per type */
+        NvmeCDQ cdqs[NVME_MGR_QTYPE_MAX + 1];
+        /*
+         * For Migration Management ctrls (MMC)
+         * refs to queues on other controllers
+         */
+        NvmeCDQRef cdq_refs[NVME_MGR_MAX_CDQS];
+        bool udmq_log;
+    } migr;
+
+    struct {
+        int ncqs;
+    } io_drain;
+
+    QTAILQ_HEAD(, NvmeSuspendRq) suspend_reqs;
+    QEMUBH *suspend_bh;
+
+    NvmeCtrlCmdState state;
 } NvmeCtrl;
 
 typedef enum NvmeResetType {
