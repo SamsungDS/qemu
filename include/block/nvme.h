@@ -622,6 +622,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
     NVME_ADM_CMD_SECURITY_SEND  = 0x81,
     NVME_ADM_CMD_SECURITY_RECV  = 0x82,
+    NVME_ADM_CMD_GET_LBA_STATUS = 0x86,
 };
 
 enum NvmeIoCommands {
@@ -1241,6 +1242,7 @@ enum NvmeIdCtrlOacs {
     NVME_OACS_DIRECTIVES    = 1 << 5,
     NVME_OACS_VMS           = 1 << 7,
     NVME_OACS_DBCS          = 1 << 8,
+    NVME_OACS_GLSS          = 1 << 9,
 };
 
 enum NvmeIdCtrlOncs {
@@ -1469,7 +1471,9 @@ typedef struct QEMU_PACKED NvmeIdNsNvm {
     uint32_t    npra;
     uint32_t    nors;
     uint32_t    npdal;
-    uint8_t     rsvd288[3808];
+    uint8_t     rsvd288[4];
+    uint32_t    lbaag;
+    uint8_t     rsvd296[3800];
 } NvmeIdNsNvm;
 
 typedef struct QEMU_PACKED NvmeIdNsInd {
@@ -1923,6 +1927,26 @@ enum NvmeIoms2Mo {
     NVME_IOMS_MO_RUH_UPDATE = 0x1,
 };
 
+#define NVME_GET_LBA_STATUS_ATYPE_ALLOCATED 0x2
+
+#define NVME_GET_LBA_STATUS_CMPC_INCOMPLETE 0x1
+#define NVME_GET_LBA_STATUS_CMPC_COMPLETE   0x2
+
+typedef struct QEMU_PACKED NvmeLBAStatusDescriptor {
+    uint64_t dslba;
+    uint32_t nlb;
+    uint8_t rsvd12;
+#define NVME_LBA_STATUS_ALLOCATED 0x2
+    uint8_t status;
+    uint8_t rsvd14[2];
+} NvmeLBAStatusDescriptor;
+
+typedef struct QEMU_PACKED NvmeLBAStatusDescriptorList {
+    uint32_t nlsd;
+    uint8_t cmpc;
+    uint8_t rsvd5[3];
+} NvmeLBAStatusDescriptorList;
+
 static inline void _nvme_check_size(void)
 {
     QEMU_BUILD_BUG_ON(sizeof(NvmeBar) != 4096);
@@ -1965,5 +1989,7 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeSecCtrlList) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeEndGrpLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeDirectiveIdentify) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeLBAStatusDescriptor) != 16);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeLBAStatusDescriptorList) != 8);
 }
 #endif

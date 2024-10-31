@@ -544,6 +544,18 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
     return true;
 }
 
+static bool nvme_ns_init_lbaag(NvmeNamespace *ns, Error **errp)
+{
+    uint64_t nlbas = le64_to_cpu(ns->id_ns.nsze);
+    long nbits = DIV_ROUND_UP(nlbas, ns->params.lbaag);
+
+    ns->lbaag_longs = BITS_TO_LONGS(nbits);
+    ns->lbaag_map = bitmap_new(nbits);
+
+    ns->id_ns_nvm.lbaag = cpu_to_le32(ns->params.lbaag);
+    return true;
+}
+
 static int nvme_ns_check_constraints(NvmeNamespace *ns, Error **errp)
 {
     unsigned int pi_size;
@@ -680,6 +692,12 @@ int nvme_ns_setup(NvmeNamespace *ns, Error **errp)
         }
     }
 
+    if (ns->params.lbaag) {
+        if (!nvme_ns_init_lbaag(ns, errp)) {
+            return -1;
+        }
+    }
+
     return 0;
 }
 
@@ -706,6 +724,10 @@ void nvme_ns_cleanup(NvmeNamespace *ns)
 
     if (ns->endgrp && ns->endgrp->fdp.enabled) {
         g_free(ns->fdp.phs);
+    }
+
+    if (ns->params.lbaag) {
+        g_free(ns->lbaag_map);
     }
 }
 
@@ -800,6 +822,7 @@ static const Property nvme_ns_props[] = {
     DEFINE_PROP_BOOL("eui64-default", NvmeNamespace, params.eui64_default,
                      false),
     DEFINE_PROP_STRING("fdp.ruhs", NvmeNamespace, params.fdp.ruhs),
+    DEFINE_PROP_UINT32("lbaag", NvmeNamespace, params.lbaag, 0),
 };
 
 static void nvme_ns_class_init(ObjectClass *oc, void *data)
