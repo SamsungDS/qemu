@@ -580,6 +580,7 @@ typedef struct NvmeParams {
     bool     atomic_dn;
     uint16_t oncs;
     uint16_t oacs;
+    bool     administrative;
 } NvmeParams;
 
 typedef struct NvmeDst {

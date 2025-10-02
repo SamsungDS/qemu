@@ -777,6 +777,11 @@ enum NvmeIoCommands {
     NVME_CMD_ZONE_APPEND        = 0x7d,
 };
 
+enum NvmeIdCtrlCntrlType {
+    NVME_CNTRL_TYPE_IO          = 0x1,
+    NVME_CNTRL_TYPE_ADMIN       = 0x3,
+};
+
 typedef struct QEMU_PACKED NvmeDeleteQ {
     uint8_t     opcode;
     uint8_t     flags;

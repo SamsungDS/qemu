@@ -165,6 +165,10 @@
  *   by the controller. To add support for the optional feature, needs to
  *   set the corresponding support indicated bit.
  *
+ * - 'administrative'
+ *   Set to true/on to make this an Administrative Controller. By default, the
+ *   controller will present itself as an I/O Controller.
+ *
  * nvme namespace device parameters
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  * - `shared`
@@ -273,6 +277,15 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_NS_WRITE_PROTECTION]      = true,
 };
 
+static const bool nvme_admin_ctrl_feature_support[NVME_FID_MAX] = {
+    [NVME_POWER_MANAGEMENT]         = true,
+    [NVME_TEMPERATURE_THRESHOLD]    = true,
+    [NVME_INTERRUPT_COALESCING]     = true,
+    [NVME_INTERRUPT_VECTOR_CONF]    = true,
+    [NVME_ASYNCHRONOUS_EVENT_CONF]  = true,
+    [NVME_TIMESTAMP]                = true,
+};
+
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_TEMPERATURE_THRESHOLD]    = NVME_FEAT_CAP_CHANGE,
     [NVME_ERROR_RECOVERY]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
@@ -290,11 +303,7 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
 };
 
 static const uint32_t nvme_cse_acs_default[256] = {
-    [NVME_ADM_CMD_DELETE_SQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_CREATE_SQ]        = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_GET_LOG_PAGE]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_DELETE_CQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_CREATE_CQ]        = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_IDENTIFY]         = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_ABORT]            = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_SET_FEATURES]     = NVME_CMD_EFF_CSUPP,
@@ -6963,6 +6972,12 @@ static uint16_t nvme_get_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
     return NVME_SUCCESS;
 }
 
+static inline bool nvme_check_fid_support(NvmeCtrl *n, uint8_t fid)
+{
+    return n->params.administrative ?
+        nvme_admin_ctrl_feature_support[fid] : nvme_feature_support[fid];
+}
+
 static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeCmd *cmd = &req->cmd;
@@ -6983,7 +6998,7 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
 
     trace_pci_nvme_getfeat(nvme_cid(req), nsid, fid, sel, dw11);
 
-    if (!nvme_feature_support[fid]) {
+    if (!nvme_check_fid_support(n, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -7284,7 +7299,7 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (!nvme_feature_support[fid]) {
+    if (!nvme_check_fid_support(n, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -9477,6 +9492,11 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
         params->max_ioqpairs = params->num_queues - 1;
     }
 
+    if (n->params.administrative && !n->subsys) {
+        error_setg(errp, "'administrative' requires a linked subsystem");
+        return false;
+    }
+
     if (n->namespace.blkconf.blk && n->subsys) {
         error_setg(errp, "subsystem support is unavailable with legacy "
                    "namespace ('drive' property)");
@@ -9654,6 +9674,10 @@ static void nvme_init_cse_iocs(NvmeCtrl *n)
     uint32_t *nvm = n->cse.iocs.nvm;
     uint32_t *zoned = n->cse.iocs.zoned;
 
+    if (n->params.administrative) {
+        return;
+    }
+
     memcpy(nvm, nvme_cse_iocs_nvm_default, sizeof(n->cse.iocs.nvm));
     nvme_init_iocs_oncs(n, nvm, oncs);
     memcpy(zoned, nvme_cse_iocs_zoned_default,
@@ -9665,6 +9689,13 @@ static void nvme_init_cse_acs(NvmeCtrl *n)
 {
     uint16_t oacs = n->params.oacs;
     uint32_t *acs = n->cse.acs;
+
+    if (!n->params.administrative) {
+        acs[NVME_ADM_CMD_DELETE_SQ] = NVME_CMD_EFF_CSUPP;
+        acs[NVME_ADM_CMD_CREATE_SQ] = NVME_CMD_EFF_CSUPP;
+        acs[NVME_ADM_CMD_DELETE_CQ] = NVME_CMD_EFF_CSUPP;
+        acs[NVME_ADM_CMD_CREATE_CQ] = NVME_CMD_EFF_CSUPP;
+    }
 
     memcpy(acs, nvme_cse_acs_default, sizeof(n->cse.acs));
 
@@ -9953,11 +9984,12 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
     uint8_t *pci_conf = pci_dev->config;
     uint64_t bar_size;
     unsigned msix_table_offset = 0, msix_pba_offset = 0;
+    uint8_t prog_interface = n->params.administrative ? 0x3 : 0x2;
     unsigned nr_vectors;
     int ret;
 
     pci_conf[PCI_INTERRUPT_PIN] = pci_is_vf(pci_dev) ? 0 : 1;
-    pci_config_set_prog_interface(pci_conf, 0x2);
+    pci_config_set_prog_interface(pci_conf, prog_interface);
 
     if (n->params.use_intel_id) {
         pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
@@ -10118,7 +10150,8 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->mdts = n->params.mdts;
     id->ver = cpu_to_le32(NVME_SPEC_VER);
     id->oacs = cpu_to_le16(n->params.oacs);
-    id->cntrltype = 0x1;
+    id->cntrltype = n->params.administrative ?
+        NVME_CNTRL_TYPE_ADMIN : NVME_CNTRL_TYPE_IO;
 
     /*
      * Because the controller always completes the Abort command immediately,
@@ -10168,7 +10201,9 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->psd[0].enlat = cpu_to_le32(0x10);
     id->psd[0].exlat = cpu_to_le32(0x4);
 
-    NVME_CAP_SET_MQES(cap, n->params.mqes);
+    id->ctratt = cpu_to_le32(ctratt);
+
+    NVME_CAP_SET_MQES(cap, n->params.administrative ? 0 : 0x7ff);
     NVME_CAP_SET_CQR(cap, 1);
     NVME_CAP_SET_TO(cap, 0xf);
     NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_NCSS);
@@ -10456,6 +10491,7 @@ static const Property nvme_props[] = {
                        NVME_OACS_DIRECTIVES |
                        NVME_OACS_VMS |
                        NVME_OACS_DBCS),
+    DEFINE_PROP_BOOL("administrative", NvmeCtrl, params.administrative, false),
     DEFINE_PROP_BOOL("use-intel-id", NvmeCtrl, params.use_intel_id, false),
     DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.legacy_cmb, false),
     DEFINE_PROP_BOOL("ioeventfd", NvmeCtrl, params.ioeventfd, false),
