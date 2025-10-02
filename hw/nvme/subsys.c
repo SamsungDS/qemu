@@ -185,10 +185,46 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
     return true;
 }
 
+void nvme_subsys_unregister_all_registrants(NvmeSubsystem *subsys, NvmeCtrl *n,
+                                            uint32_t nsid, uint64_t prkey)
+{
+    NvmeCtrl *ctrl;
+    NvmeReservations *res;
+    uint16_t host_id;
+
+    for (int i = 0; i < ARRAY_SIZE(subsys->ctrls); i++) {
+        ctrl = subsys->ctrls[i];
+        if (ctrl == n) {
+            continue;
+        }
+        if (ctrl) {
+            host_id = subsys->map_host_id[ctrl->cntlid];
+
+            res = subsys->reservations[host_id % NVME_MAX_CONTROLLERS][nsid];
+            if (prkey) {
+                if (res->curr_key == prkey) {
+                    memset(res, 0x0, sizeof(*res));
+                    res = NULL;
+                }
+            } else {
+                memset(res, 0x0, sizeof(*res));
+                res = NULL;
+            }
+        }
+    }
+}
+
 static bool nvme_subsys_setup(NvmeSubsystem *subsys, Error **errp)
 {
+    int cntlid, nsid;
     const char *nqn = subsys->params.nqn ?
         subsys->params.nqn : subsys->parent_obj.id;
+
+    for (cntlid = 0; cntlid < ARRAY_SIZE(subsys->ctrls); cntlid++) {
+        for (nsid = 1; nsid <= NVME_MAX_NAMESPACES; nsid++) {
+            subsys->reservations[cntlid][nsid] = g_malloc0(sizeof(NvmeReservations));
+        }
+    }
 
     snprintf((char *)subsys->subnqn, sizeof(subsys->subnqn),
              "nqn.2019-08.org.qemu:%s", nqn);

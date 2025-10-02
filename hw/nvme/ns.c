@@ -77,6 +77,7 @@ static int nvme_ns_init(NvmeNamespace *ns, Error **errp)
 
     /* support DULBE and I/O optimization fields */
     id_ns->nsfeat |= (NVME_ID_NS_NSFEAT_DAE | NVME_ID_NS_NSFEAT_OPTPERF_ALL);
+    id_ns->rescap = 0xFE;
 
     if (ns->params.shared) {
         id_ns->nmic |= NVME_ID_NS_IND_NMIC_SHRNS;
