@@ -84,6 +84,7 @@ pci_nvme_enqueue_event(uint8_t typ, uint8_t info, uint8_t log_page) "type 0x%"PR
 pci_nvme_enqueue_event_noqueue(int queued) "queued %d"
 pci_nvme_enqueue_event_masked(uint8_t typ) "type 0x%"PRIx8""
 pci_nvme_no_outstanding_aers(void) "ignoring event; no outstanding AERs"
+pci_nvme_dst(uint16_t cid, uint32_t nsid, uint8_t stc) "cid %"PRIu16" nsid 0x%"PRIx32" fid 0x%"PRIx8""
 pci_nvme_fw_commit(uint16_t cid, uint32_t dw10, uint8_t fwug, uint8_t fs, uint8_t ca, uint8_t bpid) "cid %"PRIu16" dw10 %"PRIu32" fwug %"PRIu8" fs %"PRIu8" ca %"PRIu8" bpid %"PRIu8""
 pci_nvme_fw_download(uint16_t cid, uint32_t numd, uint32_t ofst, uint8_t fwug) "cid %"PRIu16" numd %"PRIu32" ofst %"PRIu32" fwug %"PRIu8""
 pci_nvme_fw_commit_cb(uint16_t cid) "cid %"PRIu16""

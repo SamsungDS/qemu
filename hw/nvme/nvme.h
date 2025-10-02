@@ -559,6 +559,18 @@ typedef struct NvmeParams {
     bool     atomic_dn;
 } NvmeParams;
 
+typedef struct NvmeDst {
+    uint8_t      current_dsto;
+    uint8_t      current_dstc;
+    uint8_t      num_entries;
+    QTAILQ_HEAD(, NvmeDstEntry)  dst_list;
+} NvmeDst;
+
+typedef struct NvmeDstEntry {
+    NvmeSelfTestResult           dst_entry;
+    QTAILQ_ENTRY(NvmeDstEntry)   entry;
+} NvmeDstEntry;
+
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;
     MemoryRegion bar0;
@@ -651,6 +663,7 @@ typedef struct NvmeCtrl {
     } next_pri_ctrl_cap;    /* These override pri_ctrl_cap after reset */
     uint32_t    dn; /* Disable Normal */
     NvmeAtomic  atomic;
+    NvmeDst dst;
 } NvmeCtrl;
 
 typedef enum NvmeResetType {
