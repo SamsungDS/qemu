@@ -1768,6 +1768,20 @@ static uint16_t nvme_check_dulbe(NvmeNamespace *ns, uint64_t slba,
     return NVME_SUCCESS;
 }
 
+static inline uint16_t nvme_check_uncor(NvmeNamespace *ns, uint64_t slba,
+                                        uint32_t nlb)
+{
+    uint64_t elba = nlb + slba;
+
+    if (ns->uncorrectable) {
+        if (find_next_bit(ns->uncorrectable, elba, slba) < elba) {
+            return NVME_UNRECOVERED_READ | NVME_DNR;
+        }
+    }
+
+    return NVME_SUCCESS;
+}
+
 static inline uint32_t nvme_zone_idx(NvmeNamespace *ns, uint64_t slba)
 {
     return ns->zone_size_log2 > 0 ? slba >> ns->zone_size_log2 :
@@ -2148,6 +2162,7 @@ void nvme_rw_complete_cb(void *opaque, int ret)
     BlockBackend *blk = ns->blkconf.blk;
     BlockAcctCookie *acct = &req->acct;
     BlockAcctStats *stats = blk_get_stats(blk);
+    bool is_write = nvme_is_write(req);
 
     trace_pci_nvme_rw_complete_cb(nvme_cid(req), blk_name(blk));
 
@@ -2178,9 +2193,17 @@ void nvme_rw_complete_cb(void *opaque, int ret)
         error_report_err(err);
     } else {
         block_acct_done(stats, acct);
+
+        if (is_write) {
+            NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
+            uint64_t slba = le64_to_cpu(rw->slba);
+            uint32_t nlb = le16_to_cpu(rw->nlb) + 1;
+
+            bitmap_clear(ns->uncorrectable, slba, nlb);
+        }
     }
 
-    if (ns->params.zoned && nvme_is_write(req)) {
+    if (ns->params.zoned && is_write) {
         nvme_finalize_zoned_write(ns, req);
     }
 
@@ -2939,6 +2962,8 @@ static void nvme_copy_out_completed_cb(void *opaque, int ret)
         nvme_advance_zone_wp(dns, iocb->zone, nlb);
     }
 
+    bitmap_clear(dns->uncorrectable, iocb->slba, nlb);
+
     iocb->idx++;
     iocb->slba += nlb;
 out:
@@ -3644,6 +3669,12 @@ static uint16_t nvme_read(NvmeCtrl *n, NvmeRequest *req)
         goto invalid;
     }
 
+    status = nvme_check_uncor(ns, slba, nlb);
+    if (status) {
+        trace_pci_nvme_err_unrecoverable_read(slba, nlb);
+        return status;
+    }
+
     if (ns->params.zoned) {
         status = nvme_check_zone_read(ns, slba, nlb);
         if (status) {
@@ -3716,7 +3747,7 @@ static void nvme_do_write_fdp(NvmeCtrl *n, NvmeRequest *req, uint64_t slba,
 }
 
 static uint16_t nvme_do_write(NvmeCtrl *n, NvmeRequest *req, bool append,
-                              bool wrz)
+                              bool wrz, bool uncor)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
     NvmeNamespace *ns = req->ns;
@@ -3747,7 +3778,7 @@ static uint16_t nvme_do_write(NvmeCtrl *n, NvmeRequest *req, bool append,
     trace_pci_nvme_write(nvme_cid(req), nvme_io_opc_str(rw->opcode),
                          nvme_nsid(ns), nlb, mapped_size, slba);
 
-    if (!wrz) {
+    if (!wrz && !uncor) {
         status = nvme_check_mdts(n, mapped_size);
         if (status) {
             goto invalid;
@@ -3828,6 +3859,11 @@ static uint16_t nvme_do_write(NvmeCtrl *n, NvmeRequest *req, bool append,
         nvme_do_write_fdp(n, req, slba, nlb);
     }
 
+    if (uncor) {
+        bitmap_set(ns->uncorrectable, slba, nlb);
+        return NVME_SUCCESS;
+    }
+
     data_offset = nvme_l2b(ns, slba);
 
     if (NVME_ID_NS_DPS_TYPE(ns->id_ns.dps)) {
@@ -3858,17 +3894,22 @@ invalid:
 
 static inline uint16_t nvme_write(NvmeCtrl *n, NvmeRequest *req)
 {
-    return nvme_do_write(n, req, false, false);
+    return nvme_do_write(n, req, false, false, false);
 }
 
 static inline uint16_t nvme_write_zeroes(NvmeCtrl *n, NvmeRequest *req)
 {
-    return nvme_do_write(n, req, false, true);
+    return nvme_do_write(n, req, false, true, false);
 }
 
 static inline uint16_t nvme_zone_append(NvmeCtrl *n, NvmeRequest *req)
 {
-    return nvme_do_write(n, req, true, false);
+    return nvme_do_write(n, req, true, false, false);
+}
+
+static inline uint16_t nvme_write_uncor(NvmeCtrl *n, NvmeRequest *req)
+{
+    return nvme_do_write(n, req, false, false, true);
 }
 
 static uint16_t nvme_get_mgmt_zone_slba_idx(NvmeNamespace *ns, NvmeCmd *c,
@@ -4616,6 +4657,8 @@ static uint16_t __nvme_io_cmd_nvm(NvmeCtrl *n, NvmeRequest *req)
         return nvme_write(n, req);
     case NVME_CMD_READ:
         return nvme_read(n, req);
+    case NVME_CMD_WRITE_UNCOR:
+        return nvme_write_uncor(n, req);
     case NVME_CMD_COMPARE:
         return nvme_compare(n, req);
     case NVME_CMD_WRITE_ZEROES:
@@ -8712,6 +8755,10 @@ static void nvme_init_iocs_oncs(uint32_t *iocs, uint16_t oncs)
     iocs[NVME_CMD_COMPARE] =
         oncs & NVME_ONCS_COMPARE ?
         NVME_CMD_EFF_CSUPP : 0;
+
+    iocs[NVME_CMD_WRITE_UNCOR] =
+        oncs & NVME_ONCS_WRITE_UNCORR ? NVME_CMD_EFF_CSUPP | 
+        NVME_CMD_EFF_LBCC : 0;
 
     iocs[NVME_CMD_DSM] =
         oncs & NVME_ONCS_DSM ?

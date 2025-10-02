@@ -152,6 +152,8 @@ lbaf_found:
     id_ns->nlbaf = ns->nlbaf - 1;
     nvme_ns_init_format(ns);
 
+    ns->uncorrectable = bitmap_new(id_ns->nsze);
+
     return 0;
 }
 
@@ -698,6 +700,8 @@ void nvme_ns_shutdown(NvmeNamespace *ns)
 
 void nvme_ns_cleanup(NvmeNamespace *ns)
 {
+    g_free(ns->uncorrectable);
+
     if (ns->params.zoned) {
         g_free(ns->id_ns_zoned);
         g_free(ns->zone_array);
