@@ -149,6 +149,11 @@
  *   Indicates the maximum number of virtual queue resources assignable to
  *   a secondary controller. The default 0 resolves to
  *   `(sriov_vq_flexible / sriov_max_vfs)`.
+ * - `bootpart`
+ *   NVMe Boot Partitions provides an area that may be read by the host without
+ *   initializing queues or even enabling the controller. This 'bootpart' block
+ *   device stores platform initialization code. Its size shall be in 256 KiB
+ *   units.
  *
  * nvme namespace device parameters
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -282,6 +287,8 @@ static const uint32_t nvme_cse_acs_default[256] = {
     [NVME_ADM_CMD_FORMAT_NVM]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
     [NVME_ADM_CMD_DIRECTIVE_RECV]   = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_DIRECTIVE_SEND]   = NVME_CMD_EFF_CSUPP,
+    [NVME_ADM_CMD_DOWNLOAD_FW]      = NVME_CMD_EFF_CSUPP,
+    [NVME_ADM_CMD_COMMIT_FW]        = NVME_CMD_EFF_CSUPP,
 };
 
 static const uint32_t nvme_cse_iocs_nvm_default[256] = {
@@ -7337,6 +7344,124 @@ static uint16_t nvme_directive_receive(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
+struct nvme_bp_read_ctx {
+    NvmeCtrl *n;
+    QEMUSGList qsg;
+};
+
+static void nvme_bp_read_cb(void *opaque, int ret)
+{
+    struct nvme_bp_read_ctx *ctx = opaque;
+    NvmeCtrl *n = ctx->n;
+    uint32_t bpinfo = ldl_le_p(&n->bar.bpinfo);
+
+    trace_pci_nvme_bp_read_cb();
+
+    if (ret) {
+        NVME_BPINFO_CLEAR_BRS(bpinfo);
+        NVME_BPINFO_SET_BRS(bpinfo, NVME_BPINFO_BRS_ERROR);
+        goto free;
+    }
+
+    NVME_BPINFO_CLEAR_BRS(bpinfo);
+    NVME_BPINFO_SET_BRS(bpinfo, NVME_BPINFO_BRS_SUCCESS);
+
+free:
+    stl_le_p(&n->bar.bpinfo, bpinfo);
+
+    if (ctx->qsg.sg) {
+        qemu_sglist_destroy(&ctx->qsg);
+    }
+
+    g_free(ctx);
+}
+
+static void nvme_fw_commit_cb(void *opaque, int ret)
+{
+    NvmeRequest *req = opaque;
+
+    trace_pci_nvme_fw_commit_cb(nvme_cid(req));
+
+    if (ret) {
+        if (!req->status) {
+            req->status = NVME_INTERNAL_DEV_ERROR;
+        }
+
+        trace_pci_nvme_err_aio(nvme_cid(req), strerror(-ret), req->status);
+    }
+
+    nvme_enqueue_req_completion(nvme_cq(req), req);
+}
+
+static uint16_t nvme_fw_commit(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t dw10 = le32_to_cpu(req->cmd.cdw10);
+    uint8_t fwug = n->id_ctrl.fwug;
+    uint8_t fs = dw10 & 0x7;
+    uint8_t ca = (dw10 >> 3) & 0x7;
+    uint8_t bpid = dw10 >> 31;
+    int64_t offset = 0;
+
+    trace_pci_nvme_fw_commit(nvme_cid(req), dw10, fwug, fs, ca,
+                            bpid);
+
+    if (fs || ca == NVME_FW_CA_REPLACE) {
+        return NVME_INVALID_FW_SLOT | NVME_DNR;
+    }
+    /*
+     * current firmware commit command only support boot partions
+     * related commit actions
+     */
+    if (ca < NVME_FW_CA_REPLACE_BP) {
+        return NVME_FW_ACTIVATE_PROHIBITED | NVME_DNR;
+    }
+
+    if (ca == NVME_FW_CA_ACTIVATE_BP) {
+        uint32_t bpinfo = ldl_le_p(&n->bar.bpinfo);
+
+        NVME_BPINFO_CLEAR_ABPID(bpinfo);
+        NVME_BPINFO_SET_ABPID(bpinfo, bpid);
+
+        stl_le_p(&n->bar.bpinfo, bpinfo);
+
+        return NVME_SUCCESS;
+    }
+
+    if (bpid) {
+        offset = n->bp_size;
+    }
+
+    nvme_sg_init(n, &req->sg, false);
+    qemu_iovec_add(&req->sg.iov, n->bp_data, n->bp_size);
+
+    req->aiocb = blk_aio_pwritev(n->blk_bp, offset, &req->sg.iov, 0,
+                                 nvme_fw_commit_cb, req);
+
+    return NVME_NO_COMPLETE;
+}
+
+static uint16_t nvme_fw_download(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t numd = le32_to_cpu(req->cmd.cdw10);
+    uint32_t offset = le32_to_cpu(req->cmd.cdw11);
+    size_t len = 0;
+    uint16_t status = NVME_SUCCESS;
+
+    trace_pci_nvme_fw_download(nvme_cid(req), numd, offset, n->id_ctrl.fwug);
+
+    len = (numd + 1) << 2;
+    offset <<= 2;
+
+    if (len + offset > n->bp_size) {
+        trace_pci_nvme_fw_download_invalid_bp_size(offset, len, n->bp_size);
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    status = nvme_h2c(n, n->bp_data + offset, len, req);
+
+    return status;
+}
+
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
 {
     trace_pci_nvme_admin_cmd(nvme_cid(req), nvme_sqid(req), req->cmd.opcode,
@@ -7377,6 +7502,10 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
         return nvme_get_feature(n, req);
     case NVME_ADM_CMD_ASYNC_EV_REQ:
         return nvme_aer(n, req);
+    case NVME_ADM_CMD_COMMIT_FW:
+        return nvme_fw_commit(n, req);
+    case NVME_ADM_CMD_DOWNLOAD_FW:
+        return nvme_fw_download(n, req);
     case NVME_ADM_CMD_NS_ATTACHMENT:
         return nvme_ns_attachment(n, req);
     case NVME_ADM_CMD_VIRT_MNGMT:
@@ -7873,6 +8002,9 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         } else if (!NVME_CC_EN(data) && NVME_CC_EN(cc)) {
             trace_pci_nvme_mmio_stopped();
             nvme_ctrl_reset(n, NVME_RESET_CONTROLLER);
+            cc = 0;
+            csts &= ~NVME_CSTS_READY;
+            NVME_BPINFO_CLEAR_BRS(n->bar.bpinfo);
 
             break;
         }
@@ -7928,6 +8060,50 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         NVME_GUEST_ERR(pci_nvme_ub_mmiowr_cmbsz_readonly,
                        "invalid write to read only CMBSZ, ignored");
         return;
+
+    case NVME_REG_BPRSEL:
+        n->bar.bprsel = data & 0xffffffff;
+        size_t bp_len = NVME_BPRSEL_BPRSZ(n->bar.bprsel) * 4 * KiB;
+        int64_t bp_offset = NVME_BPRSEL_BPROF(n->bar.bprsel) * 4 * KiB;
+        int64_t off = 0;
+        struct nvme_bp_read_ctx *ctx;
+
+        trace_pci_nvme_mmio_bprsel(data, n->bar.bprsel,
+                                   NVME_BPRSEL_BPID(n->bar.bpinfo),
+                                   bp_offset, bp_len);
+
+        if (bp_len + bp_offset > n->bp_size) {
+            NVME_BPINFO_CLEAR_BRS(n->bar.bpinfo);
+            NVME_BPINFO_SET_BRS(n->bar.bpinfo, NVME_BPINFO_BRS_ERROR);
+            return;
+        }
+
+        off = NVME_BPRSEL_BPID(n->bar.bpinfo) * n->bp_size + bp_offset;
+
+        NVME_BPINFO_CLEAR_BRS(n->bar.bpinfo);
+        NVME_BPINFO_SET_BRS(n->bar.bpinfo, NVME_BPINFO_BRS_READING);
+
+        ctx = g_new(struct nvme_bp_read_ctx, 1);
+
+        ctx->n = n;
+
+        pci_dma_sglist_init(&ctx->qsg, &n->parent_obj, 1);
+
+        qemu_sglist_add(&ctx->qsg, n->bar.bpmbl, bp_len);
+
+        dma_blk_read(n->blk_bp, &ctx->qsg, off , BDRV_SECTOR_SIZE,
+                     nvme_bp_read_cb, ctx);
+        return;
+
+    case NVME_REG_BPMBL:
+        stn_le_p(&n->bar.bpmbl, size, data);
+        trace_pci_nvme_mmio_bpmbl(data, n->bar.bpmbl);
+        return;
+
+    case NVME_REG_BPMBL + 4:
+        stl_le_p((uint8_t *)&n->bar.bpmbl + 4, data);
+        return;
+
     case NVME_REG_CMBMSC:
         if (!NVME_CAP_CMBS(cap)) {
             return;
@@ -8824,7 +9000,8 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->mdts = n->params.mdts;
     id->ver = cpu_to_le32(NVME_SPEC_VER);
 
-    oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DIRECTIVES;
+    oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DBCS |
+           NVME_OACS_DIRECTIVES;
 
     if (n->params.dbcs) {
         oacs |= NVME_OACS_DBCS;
@@ -8836,6 +9013,10 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
         oacs |= NVME_OACS_VMS;
 
         n->cse.acs[NVME_ADM_CMD_VIRT_MNGMT] = NVME_CMD_EFF_CSUPP;
+    }
+
+    if (n->blk_bp) {
+        oacs |= NVME_OACS_FW;
     }
 
     id->oacs = cpu_to_le16(oacs);
@@ -8898,6 +9079,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     NVME_CAP_SET_MPSMAX(cap, 4);
     NVME_CAP_SET_CMBS(cap, n->params.cmb_size_mb ? 1 : 0);
     NVME_CAP_SET_PMRS(cap, n->pmr.dev ? 1 : 0);
+    NVME_CAP_SET_BPS(cap, 0x1);
     stq_le_p(&n->bar.cap, cap);
 
     stl_le_p(&n->bar.vs, NVME_SPEC_VER);
@@ -8906,6 +9088,41 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     if (pci_is_vf(pci_dev) && !sctrl->scs) {
         stl_le_p(&n->bar.csts, NVME_CSTS_FAILED);
     }
+    /* Boot Partition Information (BPINFO) */
+    n->bar.bpinfo = 0;
+}
+
+static int nvme_init_boot_partitions(NvmeCtrl *n, Error **errp)
+{
+    BlockBackend *blk = n->blk_bp;
+    uint32_t bpinfo = ldl_le_p(&n->bar.bpinfo);
+    uint64_t len, perm, shared_perm;
+    size_t bp_size;
+    int ret;
+
+    len = blk_getlength(blk);
+    if (len % (256 * KiB)) {
+        error_setg(errp, "boot partitions image size shall be"\
+                   " multiple of 256 KiB current size %lu", len);
+        return -1;
+    }
+
+    perm = BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE;
+    shared_perm = BLK_PERM_ALL;
+
+    ret = blk_set_perm(blk, perm, shared_perm, errp);
+    if (ret) {
+        return ret;
+    }
+
+    bp_size = len / (256 * KiB);
+    NVME_BPINFO_SET_BPSZ(bpinfo, bp_size);
+    stl_le_p(&n->bar.bpinfo, bpinfo);
+    n->bp_size = bp_size * 128 * KiB;
+
+    n->bp_data = g_malloc(n->bp_size);
+
+    return 0;
 }
 
 static int nvme_init_subsys(NvmeCtrl *n, Error **errp)
@@ -9013,6 +9230,12 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
 
         n->subsys->namespaces[ns->params.nsid] = ns;
     }
+
+    if (n->blk_bp) {
+        if (nvme_init_boot_partitions(n, errp)) {
+            return;
+        }
+    }
 }
 
 static void nvme_exit(PCIDevice *pci_dev)
@@ -9035,6 +9258,7 @@ static void nvme_exit(PCIDevice *pci_dev)
     g_free(n->cq);
     g_free(n->sq);
     g_free(n->aer_reqs);
+    g_free(n->bp_data);
 
     if (n->params.cmb_size_mb) {
         g_free(n->cmb.buf);
@@ -9068,6 +9292,7 @@ static const Property nvme_props[] = {
                      HostMemoryBackend *),
     DEFINE_PROP_LINK("subsys", NvmeCtrl, subsys, TYPE_NVME_SUBSYS,
                      NvmeSubsystem *),
+    DEFINE_PROP_DRIVE("bootpart", NvmeCtrl, blk_bp),
     DEFINE_PROP_STRING("serial", NvmeCtrl, params.serial),
     DEFINE_PROP_UINT32("cmb_size_mb", NvmeCtrl, params.cmb_size_mb, 0),
     DEFINE_PROP_UINT32("num_queues", NvmeCtrl, params.num_queues, 0),
