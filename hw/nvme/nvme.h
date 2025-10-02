@@ -579,6 +579,7 @@ typedef struct NvmeParams {
     uint16_t atomic_awupf;
     bool     atomic_dn;
     uint16_t oncs;
+    uint16_t oacs;
 } NvmeParams;
 
 typedef struct NvmeDst {

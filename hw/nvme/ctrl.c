@@ -160,6 +160,11 @@
  *   by the controller. To add support for the optional feature, needs to
  *   set the corresponding support indicated bit.
  *
+ * - `oacs`
+ *   This field indicates the optional Admin commands and features supported
+ *   by the controller. To add support for the optional feature, needs to
+ *   set the corresponding support indicated bit.
+ *
  * nvme namespace device parameters
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  * - `shared`
@@ -294,14 +299,6 @@ static const uint32_t nvme_cse_acs_default[256] = {
     [NVME_ADM_CMD_SET_FEATURES]     = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_GET_FEATURES]     = NVME_CMD_EFF_CSUPP,
     [NVME_ADM_CMD_ASYNC_EV_REQ]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_NS_ATTACHMENT]    = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_NIC |
-                                      NVME_CMD_EFF_CCC,
-    [NVME_ADM_CMD_FORMAT_NVM]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_ADM_CMD_DIRECTIVE_RECV]   = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_DIRECTIVE_SEND]   = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_DST]              = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_DOWNLOAD_FW]      = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_COMMIT_FW]        = NVME_CMD_EFF_CSUPP,
 };
 
 static const uint32_t nvme_cse_iocs_nvm_default[256] = {
@@ -9460,6 +9457,46 @@ static void nvme_init_cse_iocs(NvmeCtrl *n)
     nvme_init_iocs_oncs(n, zoned, oncs);
 }
 
+static void nvme_init_cse_acs(NvmeCtrl *n)
+{
+    uint16_t oacs = n->params.oacs;
+    uint32_t *acs = n->cse.acs;
+
+    memcpy(acs, nvme_cse_acs_default, sizeof(n->cse.acs));
+
+    if (oacs & NVME_OACS_FORMAT) {
+        acs[NVME_ADM_CMD_FORMAT_NVM] =
+            NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC;
+    }
+
+    if (oacs & NVME_OACS_FW && n->blk_bp) {
+        acs[NVME_ADM_CMD_DOWNLOAD_FW] = NVME_CMD_EFF_CSUPP;
+        acs[NVME_ADM_CMD_COMMIT_FW] = NVME_CMD_EFF_CSUPP;
+    }
+
+    if (oacs & NVME_OACS_NMS) {
+        acs[NVME_ADM_CMD_NS_ATTACHMENT] =
+            NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_NIC;
+    }
+
+    if (oacs & NVME_OACS_DST) {
+        acs[NVME_ADM_CMD_DST] = NVME_CMD_EFF_CSUPP;
+    }
+
+    if (oacs & NVME_OACS_DIRECTIVES) {
+        acs[NVME_ADM_CMD_DIRECTIVE_RECV] = NVME_CMD_EFF_CSUPP;
+        acs[NVME_ADM_CMD_DIRECTIVE_SEND] = NVME_CMD_EFF_CSUPP;
+    }
+
+    if (oacs & NVME_OACS_VMS) {
+        acs[NVME_ADM_CMD_DBBUF_CONFIG] = NVME_CMD_EFF_CSUPP;
+    }
+
+    if (oacs & NVME_OACS_DBCS) {
+        acs[NVME_ADM_CMD_DBBUF_CONFIG] = NVME_CMD_EFF_CSUPP;
+    }
+}
+
 static void nvme_init_state(NvmeCtrl *n)
 {
     NvmePriCtrlCap *cap = &n->pri_ctrl_cap;
@@ -9833,10 +9870,9 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     uint64_t cap = ldq_le_p(&n->bar.cap);
     NvmeSecCtrlEntry *sctrl = nvme_sctrl(n);
     uint32_t ctratt = le32_to_cpu(id->ctratt);
-    uint16_t oacs;
 
     nvme_init_cse_iocs(n);
-    memcpy(n->cse.acs, nvme_cse_acs_default, sizeof(n->cse.acs));
+    nvme_init_cse_acs(n);
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
@@ -9868,28 +9904,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 
     id->mdts = n->params.mdts;
     id->ver = cpu_to_le32(NVME_SPEC_VER);
-
-    oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DBCS |
-           NVME_OACS_DST | NVME_OACS_DIRECTIVES;
-
-    if (n->params.dbcs) {
-        oacs |= NVME_OACS_DBCS;
-
-        n->cse.acs[NVME_ADM_CMD_DBBUF_CONFIG] = NVME_CMD_EFF_CSUPP;
-    }
-
-    if (n->params.sriov_max_vfs) {
-        oacs |= NVME_OACS_VMS;
-
-        n->cse.acs[NVME_ADM_CMD_VIRT_MNGMT] = NVME_CMD_EFF_CSUPP;
-    }
-
-    if (n->blk_bp) {
-        oacs |= NVME_OACS_FW;
-    }
-
-    id->oacs = cpu_to_le16(oacs);
-
+    id->oacs = cpu_to_le16(n->params.oacs);
     id->cntrltype = 0x1;
 
     /*
@@ -10218,10 +10233,17 @@ static const Property nvme_props[] = {
                        NVME_ONCS_TIMESTAMP |
                        NVME_ONCS_VERIFY |
                        NVME_ONCS_COPY),
+    DEFINE_PROP_UINT16("oacs", NvmeCtrl, params.oacs, 
+                       NVME_OACS_FORMAT |
+                       NVME_OACS_FW |
+                       NVME_OACS_NMS |
+                       NVME_OACS_DST |
+                       NVME_OACS_DIRECTIVES |
+                       NVME_OACS_VMS |
+                       NVME_OACS_DBCS),
     DEFINE_PROP_BOOL("use-intel-id", NvmeCtrl, params.use_intel_id, false),
     DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.legacy_cmb, false),
     DEFINE_PROP_BOOL("ioeventfd", NvmeCtrl, params.ioeventfd, false),
-    DEFINE_PROP_BOOL("dbcs", NvmeCtrl, params.dbcs, true),
     DEFINE_PROP_UINT8("zoned.zasl", NvmeCtrl, params.zasl, 0),
     DEFINE_PROP_BOOL("zoned.auto_transition", NvmeCtrl,
                      params.auto_transition_zones, true),
