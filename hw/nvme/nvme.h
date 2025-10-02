@@ -692,6 +692,7 @@ typedef struct NvmeCtrl {
     uint32_t    dn; /* Disable Normal */
     NvmeAtomic  atomic;
     NvmeDst dst;
+    NvmeSanitizeLog sanilog;
 } NvmeCtrl;
 
 typedef enum NvmeResetType {

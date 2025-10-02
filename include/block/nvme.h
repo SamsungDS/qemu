@@ -753,6 +753,7 @@ enum NvmeAdminCommands {
     NVME_ADM_CMD_FORMAT_NVM     = 0x80,
     NVME_ADM_CMD_SECURITY_SEND  = 0x81,
     NVME_ADM_CMD_SECURITY_RECV  = 0x82,
+    NVME_ADM_CMD_SANITIZE       = 0x84,
 };
 
 enum NvmeIoCommands {
@@ -998,6 +999,7 @@ enum NvmeAsyncEventRequest {
     NVME_AER_INFO_SMART_TEMP_THRESH         = 1,
     NVME_AER_INFO_SMART_SPARE_THRESH        = 2,
     NVME_AER_INFO_NOTICE_NS_ATTR_CHANGED    = 0,
+    NVME_AER_INFO_SANITIZE_COMPLETED        = 1,
 };
 
 typedef struct QEMU_PACKED NvmeAerResult {
@@ -1042,6 +1044,7 @@ enum NvmeStatusCodes {
     NVME_INVALID_USE_OF_CMB     = 0x0012,
     NVME_INVALID_PRP_OFFSET     = 0x0013,
     NVME_HOST_ID_INCONSISTENT   = 0x0018,
+    NVME_SANITIZE_IN_PROGRESS   = 0x001d,
     NVME_NS_WRITE_PROT          = 0x0020,
     NVME_COMMAND_INTERRUPTED    = 0x0021,
     NVME_FDP_DISABLED           = 0x0029,
@@ -1079,6 +1082,7 @@ enum NvmeStatusCodes {
     NVME_INVALID_SEC_CTRL_STATE = 0x0120,
     NVME_INVALID_NUM_RESOURCES  = 0x0121,
     NVME_INVALID_RESOURCE_ID    = 0x0122,
+    NVME_SANITIZE_PROHIBITED    = 0x0123,
     NVME_IOCS_NOT_SUPPORTED     = 0x0129,
     NVME_IOCS_NOT_ENABLED       = 0x012a,
     NVME_IOCS_COMBINATION_REJECTED = 0x012b,
@@ -1111,6 +1115,33 @@ enum NvmeStatusCodes {
     NVME_MORE                   = 0x2000,
     NVME_DNR                    = 0x4000,
     NVME_NO_COMPLETE            = 0xffff,
+};
+
+typedef struct NvmeSanitizeStatus {
+    uint8_t     status:3;
+    uint8_t     owcount:5;
+    uint8_t     gdataerase:1;
+    uint8_t     rsvd:7;
+} NvmeSanitizeSstat;
+
+typedef struct NvmeSanitizeLog {
+    uint16_t            sprog;
+    struct NvmeSanitizeStatus  sstat;
+    uint32_t            scdw10;
+    uint32_t            etfo;
+    uint32_t            etfbe;
+    uint32_t            etfce;
+    uint32_t            etfo_no_deac;
+    uint32_t            etfbe_no_deac;
+    uint32_t            etfce_no_deac;
+    uint8_t             rsvd[480];
+} NvmeSanitizeLog;
+
+enum NvmeSanitizeOpStatus {
+    NVME_SANITIZE_OP_NEVER_OCCURED = 0,
+    NVME_SANITIZE_OP_COMPLETED     = 1,
+    NVME_SANITIZE_OP_IN_PROGRESS   = 2,
+    NVME_SANITIZE_OP_FAILED        = 3,
 };
 
 typedef struct QEMU_PACKED NvmeFwSlotInfoLog {
@@ -1275,6 +1306,7 @@ enum NvmeLogIdentifier {
     NVME_LOG_FDP_STATS                  = 0x22,
     NVME_LOG_FDP_EVENTS                 = 0x23,
     NVME_LOG_RSV_INFO                   = 0x80,
+    NVME_LOG_SANITIZE                   = 0x81,
     NVME_LOG_VENDOR_START               = 0xc0,
     NVME_LOG_VENDOR_END                 = 0xff,
 };
@@ -1485,6 +1517,21 @@ enum NvmeIdCtrlCmic {
 enum NvmeNsAttachmentOperation {
     NVME_NS_ATTACHMENT_ATTACH = 0x0,
     NVME_NS_ATTACHMENT_DETACH = 0x1,
+};
+
+enum NvmeIdctrlSanicap {
+    NVME_SANICAP_CRYPTO_ERASE   = 1 << 0,
+    NVME_SANICAP_BLOCK_ERASE    = 1 << 1,
+    NVME_SANICAP_OVERWRITE      = 1 << 2,
+    NVME_SANICAP_NDI            = 1 << 29,
+    NVME_SANICAP_NODMMAS        = 1 << 30,
+};
+
+enum NvmeSanact {
+    NVME_SANITIZE_EXIT_FAILURE  = 1,
+    NVME_SANITIZE_BLOCK_ERASE   = 2,
+    NVME_SANITIZE_OVERWRITE     = 3,
+    NVME_SANITIZE_CRYPTO_ERASE  = 4,
 };
 
 #define NVME_CTRL_SQES_MIN(sqes) ((sqes) & 0xf)
@@ -2158,6 +2205,7 @@ static inline void _nvme_check_size(void)
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeSmartLogExtended) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeEffectsLog) != 4096);
+    QEMU_BUILD_BUG_ON(sizeof(NvmeSanitizeLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrlZoned) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrlNvm) != 4096);

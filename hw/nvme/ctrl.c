@@ -243,6 +243,7 @@
 #define NVME_VF_RES_GRANULARITY 1
 #define NVME_VF_OFFSET 0x1
 #define NVME_VF_STRIDE 1
+#define NVME_SANITIZE_NO_TIME_REPORT 0xffffffff
 
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
@@ -2351,6 +2352,55 @@ static void nvme_rw_cb(void *opaque, int ret)
 
 out:
     nvme_rw_complete_cb(req, ret);
+}
+
+struct nvme_aio_sanitize_ow_ctx {
+    QEMUIOVector iov;
+    NvmeNamespace *ns;
+    NvmeRequest *req;
+    uint8_t *ovr_buf;
+    int *count;
+};
+
+static void nvme_aio_sanitize_ow_cb(void *opaque, int ret)
+{
+    struct nvme_aio_sanitize_ow_ctx *ctx = opaque;
+    NvmeRequest *req = ctx->req;
+    NvmeNamespace *ns = ctx->ns;
+    uintptr_t *num_ovrs = (uintptr_t *)&req->opaque;
+    int *count = ctx->count;
+    NvmeSQueue *sq = req->sq;
+    NvmeCtrl *n = sq->ctrl;
+
+    g_free(ctx->ovr_buf);
+    g_free(ctx);
+
+    if (ret) {
+        if (!req->status) {
+            req->status = NVME_WRITE_FAULT;
+        }
+        trace_pci_nvme_err_aio(nvme_cid(req), strerror(-ret), req->status);
+    }
+
+    if (--(*count)) {
+        return;
+    }
+
+    g_free(count);
+    ns->status = 0x0;
+
+    if (--(*num_ovrs)) {
+        return;
+    }
+
+    nvme_enqueue_event(n, NVME_AER_TYPE_IO_SPECIFIC,
+                       NVME_AER_INFO_SANITIZE_COMPLETED,
+                       NVME_LOG_SANITIZE);
+
+    n->sanilog.sstat.status = NVME_SANITIZE_OP_COMPLETED;
+    n->sanilog.sprog = 0xffff;
+
+    nvme_enqueue_req_completion(nvme_cq(req), req);
 }
 
 static void nvme_verify_cb(void *opaque, int ret)
@@ -6059,6 +6109,24 @@ static uint16_t nvme_rsv_logpage(NvmeCtrl *n,  uint32_t buf_len, uint64_t off,
     return status;
 }
 
+static uint16_t nvme_sanitize_info(NvmeCtrl *n, uint8_t rae, uint32_t buf_len,
+                                   uint64_t off, NvmeRequest *req)
+{
+    uint32_t trans_len;
+
+    if (off >= sizeof(n->sanilog)) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    trans_len = MIN(sizeof(n->sanilog) - off, buf_len);
+
+    if (!rae) {
+        nvme_clear_events(n, NVME_AER_TYPE_IO_SPECIFIC);
+    }
+
+    return nvme_c2h(n, ((uint8_t *)&n->sanilog) + off, trans_len, req);
+}
+
 static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeCmd *cmd = &req->cmd;
@@ -6119,6 +6187,8 @@ static uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req)
         return nvme_fdp_stats(n, lspi, len, off, req);
     case NVME_LOG_FDP_EVENTS:
         return nvme_fdp_events(n, lspi, len, off, req);
+    case NVME_LOG_SANITIZE:
+        return nvme_sanitize_info(n, rae, len, off, req);
     case NVME_LOG_DEV_SELF_TEST:
         return nvme_dst_info(n, len, off, req);
     case NVME_LOG_RSV_INFO:
@@ -8268,6 +8338,138 @@ static uint16_t nvme_dst(NvmeCtrl *n, NvmeRequest *req)
     return nvme_dst_processing(n, nsid, stc);
 }
 
+static uint16_t nvme_sanitize_overwrite(NvmeCtrl *n, uint8_t owpass,
+                                        uint8_t oipbp, uint32_t ovrpat,
+                                        NvmeNamespace *ns, NvmeRequest *req)
+{
+    uint32_t ovrpat_invrse, prev_ovrpat;
+    int owpass_iter;
+    bool owpass_is_even = owpass & 0x1;
+    int64_t len, offset;
+    int *count;
+    uintptr_t *num_ovrs = (uintptr_t *)&req->opaque;
+    struct nvme_aio_sanitize_ow_ctx *ctx;
+
+    if (!owpass) {
+        owpass = 0xf;
+    }
+
+    count = g_new(int, 1);
+    /* 1-initialize; see the comment in nvme_dsm */
+    *count = 1;
+
+    len = ns->size;
+    offset = 0;
+
+    ctx = g_new(struct nvme_aio_sanitize_ow_ctx, 1);
+    ctx->req = req;
+    ctx->ns = ns;
+    ctx->count = count;
+    ctx->ovr_buf = g_malloc(len);
+
+    (*num_ovrs)++;
+
+    ns->status = NVME_SANITIZE_IN_PROGRESS;
+    prev_ovrpat = ovrpat ^ 0xffffffff;
+
+    for (owpass_iter = 1; owpass_iter <= owpass; owpass_iter++) {
+        if (!oipbp) {
+            memset(ctx->ovr_buf, ovrpat, len);
+        } else {
+            if (owpass_is_even) {
+                if (owpass_iter == 0x1) {
+                    ovrpat_invrse = ovrpat ^ 0xffffffff;
+                    memset(ctx->ovr_buf, ovrpat_invrse, len);
+                } else {
+                    ovrpat_invrse =  prev_ovrpat ^ 1;
+                    memset(ctx->ovr_buf, ovrpat_invrse, len);
+                    prev_ovrpat =  ovrpat_invrse;
+                }
+            } else {
+                if (owpass_iter == 0x1) {
+                    memset(ctx->ovr_buf, ovrpat, len);
+                } else {
+                    ovrpat_invrse = prev_ovrpat ^ 1;
+                    memset(ctx->ovr_buf, ovrpat_invrse, len);
+                    prev_ovrpat =  ovrpat_invrse;
+                }
+            }
+        }
+        n->sanilog.sstat.owcount = owpass_iter;
+        (*count)++;
+
+        qemu_iovec_init(&ctx->iov, 1);
+        qemu_iovec_add(&ctx->iov, ctx->ovr_buf, len);
+
+        req->aiocb = blk_aio_pwritev(ns->blkconf.blk, offset, &ctx->iov, 0,
+                                     nvme_aio_sanitize_ow_cb, ctx);
+    }
+
+    if (--(*count)) {
+        return NVME_NO_COMPLETE;
+    }
+
+    g_free(count);
+    ns->status = 0x0;
+    (*num_ovrs)--;
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_sanitize(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+    uint32_t dw10 = le32_to_cpu(req->cmd.cdw10);
+    uint32_t ovrpat = le32_to_cpu(req->cmd.cdw11);
+    uint8_t sanact = dw10 & 0x7;
+    uint8_t owpass = (dw10 >> 4) & 0xf;
+    uint8_t oipbp = (dw10 >> 8) & 0x1;
+    uint16_t status = NVME_SUCCESS;
+    uintptr_t *num_ovrs;
+    int i;
+    NvmeNamespace *ns;
+
+    if (n->bar.pmrctl & 0x1) {
+        return NVME_SANITIZE_PROHIBITED;
+    }
+
+    if (nsid) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    n->sanilog.scdw10 = dw10;
+    switch (sanact) {
+    case NVME_SANITIZE_EXIT_FAILURE:
+        n->sanilog.sstat.status = NVME_SANITIZE_OP_COMPLETED;
+        n->sanilog.sprog = 0xffff;
+        return NVME_SUCCESS;
+    case NVME_SANITIZE_OVERWRITE:
+        num_ovrs = (uintptr_t *)&req->opaque;
+        /* 1-initialize; see the comment in nvme_dsm */
+        *num_ovrs = 1;
+        n->sanilog.sstat.status = NVME_SANITIZE_OP_IN_PROGRESS;
+        n->sanilog.sprog = 0;
+
+        for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
+            ns = nvme_ns(n, i);
+            if (!ns) {
+                continue;
+            }
+            status = nvme_sanitize_overwrite(n, owpass, oipbp, ovrpat,
+                                             ns, req);
+        }
+        /* account for the 1-initialization */
+        if (--(*num_ovrs)) {
+            return NVME_NO_COMPLETE;
+        }
+        break;
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    return status;
+}
+
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
 {
     trace_pci_nvme_admin_cmd(nvme_cid(req), nvme_sqid(req), req->cmd.opcode,
@@ -8312,6 +8514,8 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
         return nvme_fw_commit(n, req);
     case NVME_ADM_CMD_DOWNLOAD_FW:
         return nvme_fw_download(n, req);
+    case NVME_ADM_CMD_SANITIZE:
+        return nvme_sanitize(n, req);
     case NVME_ADM_CMD_DST:
         return nvme_dst(n, req);
     case NVME_ADM_CMD_NS_ATTACHMENT:
@@ -9495,6 +9699,8 @@ static void nvme_init_cse_acs(NvmeCtrl *n)
     if (oacs & NVME_OACS_DBCS) {
         acs[NVME_ADM_CMD_DBBUF_CONFIG] = NVME_CMD_EFF_CSUPP;
     }
+
+    acs[NVME_ADM_CMD_SANITIZE] = NVME_CMD_EFF_CSUPP;
 }
 
 static void nvme_init_state(NvmeCtrl *n)
@@ -9585,6 +9791,13 @@ static void nvme_init_state(NvmeCtrl *n)
             atomic->atomic_writes = 1;
         }
     }
+
+    n->sanilog.etfo = NVME_SANITIZE_NO_TIME_REPORT;
+    n->sanilog.etfbe = NVME_SANITIZE_NO_TIME_REPORT;
+    n->sanilog.etfce = NVME_SANITIZE_NO_TIME_REPORT;
+    n->sanilog.etfo_no_deac = NVME_SANITIZE_NO_TIME_REPORT;
+    n->sanilog.etfbe_no_deac = NVME_SANITIZE_NO_TIME_REPORT;
+    n->sanilog.etfce_no_deac = NVME_SANITIZE_NO_TIME_REPORT;
 
     QTAILQ_INIT(&n->dst.dst_list);
 
@@ -9926,6 +10139,8 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     /* recommended default value (~70 C) */
     id->wctemp = cpu_to_le16(NVME_TEMPERATURE_WARNING);
     id->cctemp = cpu_to_le16(NVME_TEMPERATURE_CRITICAL);
+
+    id->sanicap = cpu_to_le32(NVME_SANICAP_OVERWRITE);
 
     id->sqes = (NVME_SQES << 4) | NVME_SQES;
     id->cqes = (NVME_CQES << 4) | NVME_CQES;
