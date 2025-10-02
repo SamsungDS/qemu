@@ -1042,6 +1042,7 @@ enum NvmeStatusCodes {
     NVME_INVALID_USE_OF_CMB     = 0x0012,
     NVME_INVALID_PRP_OFFSET     = 0x0013,
     NVME_HOST_ID_INCONSISTENT   = 0x0018,
+    NVME_NS_WRITE_PROT          = 0x0020,
     NVME_COMMAND_INTERRUPTED    = 0x0021,
     NVME_FDP_DISABLED           = 0x0029,
     NVME_INVALID_PHID_LIST      = 0x002a,
@@ -1379,7 +1380,7 @@ typedef struct QEMU_PACKED NvmeIdCtrl {
     uint16_t    awun;
     uint16_t    awupf;
     uint8_t     nvscc;
-    uint8_t     rsvd531;
+    uint8_t     nwpc;
     uint16_t    acwu;
     uint16_t    ocfs;
     uint32_t    sgls;
@@ -1551,6 +1552,7 @@ enum NvmeFeatureIds {
     NVME_SOFTWARE_PROGRESS_MARKER   = 0x80,
     NVME_HOST_IDENTIFIER            = 0x81,
     NVME_RESERVATION_NOTICE_MASK    = 0x82,
+    NVME_NS_WRITE_PROTECTION        = 0x84,
     NVME_FID_MAX                    = 0x100,
 };
 
@@ -2118,6 +2120,18 @@ REG32(NVME_IOMS, 0x0)
 enum NvmeIoms2Mo {
     NVME_IOMS_MO_NOP = 0x0,
     NVME_IOMS_MO_RUH_UPDATE = 0x1,
+};
+
+enum NvmeNsWriteProtect {
+    NVME_NS_WR_PROTECT                      = 0x01,
+    NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE       = 0x02,
+    NVME_NS_PERM_WR_PROTECT                 = 0x03,
+};
+
+enum NvmeNsWriteProtectMask {
+    NVME_NS_WR_PROTECT_MASK                    = 1 << 0,
+    NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE_MASK     = 1 << 1,
+    NVME_NS_PERM_WR_PROTECT_MASK               = 1 << 2,
 };
 
 static inline void _nvme_check_size(void)

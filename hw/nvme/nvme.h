@@ -230,6 +230,7 @@ typedef struct NvmeNamespaceParams {
     struct {
         char *ruhs;
     } fdp;
+    bool     perm_wr_protect;
 } NvmeNamespaceParams;
 
 typedef struct NvmeAtomic {
@@ -295,6 +296,7 @@ typedef struct NvmeNamespace {
         uint16_t *phs;
     } fdp;
     unsigned long *uncorrectable;
+    uint8_t nwps;
 } NvmeNamespace;
 
 static inline uint32_t nvme_nsid(NvmeNamespace *ns)

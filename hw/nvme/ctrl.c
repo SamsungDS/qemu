@@ -218,6 +218,8 @@
 #include "hw/pci/pcie_sriov.h"
 #include "system/spdm-socket.h"
 #include "migration/vmstate.h"
+#include "qobject/qdict.h"
+#include "monitor/hmp.h"
 
 #include "nvme.h"
 #include "dif.h"
@@ -262,6 +264,7 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_FDP_EVENTS]               = true,
     [NVME_HOST_IDENTIFIER]          = true,
     [NVME_RESERVATION_NOTICE_MASK]  = true,
+    [NVME_NS_WRITE_PROTECTION]      = true,
 };
 
 static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
@@ -2749,6 +2752,10 @@ static uint16_t nvme_dsm(NvmeCtrl *n, NvmeRequest *req)
     uint32_t nr = (le32_to_cpu(dsm->nr) & 0xff) + 1;
     uint16_t status = NVME_SUCCESS;
 
+    if (ns->id_ns.nsattr & 0x1) {
+        return NVME_NS_WRITE_PROT | NVME_DNR;
+    }
+
     trace_pci_nvme_dsm(nr, attr);
 
     if (n->subsys) {
@@ -4135,6 +4142,10 @@ static uint16_t nvme_read(NvmeCtrl *n, NvmeRequest *req)
     uint64_t data_offset;
     BlockBackend *blk = ns->blkconf.blk;
     uint16_t status;
+
+    if ((ns->id_ns.nsattr & 0x1) == 1) {
+        return NVME_NS_WRITE_PROT | NVME_DNR;
+    }
 
     if (nvme_ns_ext(ns) && !(NVME_ID_CTRL_CTRATT_MEM(n->id_ctrl.ctratt))) {
         mapped_size += nvme_m2b(ns, nlb);
@@ -7029,6 +7040,13 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
             return ret;
         }
         goto out;
+    case NVME_NS_WRITE_PROTECTION:
+        ns = nvme_ns(n, nsid);
+        if (!nvme_nsid_valid(n, nsid)) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+        result = cpu_to_le32(ns->nwps);
+        break;
     case NVME_HOST_IDENTIFIER:
         nvme_c2h(n, (uint8_t *)&n->features.hostid, sizeof(n->features.hostid), req);
         break;
@@ -7183,6 +7201,7 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
     NvmeSubsystem *subsys;
     NvmeReservations *res;
     uint64_t curr_host_id, prev_host_id;
+    uint8_t nwps_local;
     uint16_t ret;
     int i;
     NvmeIdCtrl *id = &n->id_ctrl;
@@ -7403,6 +7422,36 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
         } else {
             atomic->atomic_writes = 1;
         }
+        break;
+    case NVME_NS_WRITE_PROTECTION:
+        ns = nvme_ns(n, nsid);
+        if (!nvme_nsid_valid(n, nsid)) {
+            return NVME_INVALID_NSID | NVME_DNR;
+        }
+
+        nwps_local = dw11 & 0x3;
+
+        if (((n->id_ctrl.nwpc & NVME_NS_WR_PROTECT_MASK) == 0 &&
+             nwps_local == NVME_NS_WR_PROTECT) ||
+           ((n->id_ctrl.nwpc & NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE_MASK)  == 0 &&
+             nwps_local == NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE) ||
+           ((n->id_ctrl.nwpc & NVME_NS_PERM_WR_PROTECT_MASK)  == 0 &&
+             nwps_local == NVME_NS_PERM_WR_PROTECT) ||
+           (nwps_local > NVME_NS_PERM_WR_PROTECT)) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (ns->nwps == NVME_NS_PERM_WR_PROTECT &&
+            nwps_local < NVME_NS_PERM_WR_PROTECT) {
+            return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
+        }
+
+        if (ns->nwps == NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE &&
+            nwps_local < NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE) {
+            return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
+        }
+
+        ns->id_ns.nsattr = nwps_local > 0 ? 1 : 0;
+        ns->nwps = nwps_local;
         break;
     default:
         return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
@@ -9881,6 +9930,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
                             NVME_OCFS_COPY_FORMAT_2 | NVME_OCFS_COPY_FORMAT_3);
     id->sgls = cpu_to_le32(NVME_CTRL_SGLS_SUPPORT_NO_ALIGN |
                            NVME_CTRL_SGLS_MPTR_SGL);
+    id->nwpc = NVME_NS_WR_PROTECT_MASK | NVME_NS_PERM_WR_PROTECT_MASK;
 
     nvme_init_subnqn(n);
 
@@ -9989,6 +10039,40 @@ void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns)
 
     n->namespaces[nsid] = ns;
     ns->attached++;
+}
+
+static void nvme_power_cycle(NvmeCtrl *n)
+{
+    for (uint32_t cntlid = 0; cntlid < ARRAY_SIZE(n->subsys->ctrls); cntlid++) {
+        NvmeCtrl *ctrl = nvme_subsys_ctrl(n->subsys, cntlid);
+        if (!ctrl) {
+            continue;
+        }
+        for (int nsid = 1; nsid <= NVME_MAX_NAMESPACES; nsid++) {
+            NvmeNamespace *ns = nvme_ns(ctrl, nsid);
+            if (!ns) {
+                continue;
+            }
+            if (ns->nwps == NVME_NS_WR_PROTECT_UNTIL_PW_CYCLE) {
+                ns->nwps = 0;
+                ns->id_ns.nsattr = 0;
+            }
+        }
+    }
+}
+
+void hmp_nvme_issue_power_cycle(Monitor *mon, const QDict *qdict)
+{
+    const char *id = qdict_get_str(qdict, "id");
+    NvmeCtrl *n;
+    DeviceState *dev;
+
+    dev = qdev_find_recursive(sysbus_get_default(), id);
+    if (!dev) {
+        return;
+    }
+    n = NVME(dev);
+    nvme_power_cycle(n);
 }
 
 static void nvme_realize(PCIDevice *pci_dev, Error **errp)
