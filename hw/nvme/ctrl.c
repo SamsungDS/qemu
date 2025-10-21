@@ -3316,6 +3316,12 @@ static void nvme_slm_do_copy(NvmeSLMCopyAIOCB *iocb)
         ns = nvme_ns(iocb->n, snsid);
         len = nvme_l2b(ns, nlb);
 
+        if (!(nvme_namespace_reachable(iocb->n, req->ns->params.nsid,
+                                        ns->params.nsid))) {
+                status = NVME_NS_NOT_REACHABLE | NVME_DNR;
+                goto invalid;
+        }
+
         if (iocb->copy_length <= 0) {
             status = NVME_CMD_SIZE_LIMIT | NVME_DNR;
             goto invalid;
@@ -5572,6 +5578,70 @@ static uint16_t nvme_zone_mgmt_recv(NvmeCtrl *n, NvmeRequest *req)
     return status;
 }
 
+bool nvme_namespace_reachable(NvmeCtrl *n, uint32_t snsid, uint32_t dnsid)
+{
+    NvmeReachabilityAssociation *ra = NULL;
+    ra_rg *rarg_entry = NULL;
+    struct NvmeNamespace *sns = NULL;
+    struct NvmeNamespace *dns = NULL;
+    uint32_t srgid = 0;
+    uint32_t drgid = 0;
+    bool status = false;
+    bool srgid_found = false;
+    bool drgid_found = false;
+
+
+    sns = nvme_ns(n, snsid);
+    if (!sns) {
+        goto exit;
+    }
+
+    if (sns->params.rgid) {
+        srgid = sns->params.rgid;
+    } else {
+        goto exit;
+    }
+
+    dns = nvme_ns(n, dnsid);
+    if (!dns) {
+        goto exit;
+    }
+
+    if (dns->params.rgid) {
+        drgid = dns->params.rgid;
+    } else {
+        goto exit;
+    }
+
+    for (int id = 1; id <= NVME_MAX_NAMESPACES; id++) {
+
+        if (n->ra[id]) {
+            ra = n->ra[id];
+            QTAILQ_FOREACH(rarg_entry, &ra->ra_rg_list, entry) {
+
+                if (rarg_entry->rgid == srgid) {
+                    srgid_found = true;
+                }
+
+                if (rarg_entry->rgid == drgid) {
+                    drgid_found = true;
+                }
+
+            }
+
+            if (srgid_found && drgid_found) {
+                    status = true;
+                    goto exit;
+            }
+            srgid_found = false;
+            drgid_found = false;
+        }
+    }
+exit:
+    return status;
+
+}
+
 static uint16_t nvme_slm_write(NvmeCtrl *n, NvmeRequest *req)
 {
     uint16_t ret;
@@ -5684,6 +5754,13 @@ static uint16_t nvme_slm_copy(NvmeCtrl *n, NvmeRequest *req)
                         int64_t copy_size;
                         if (remaining_size <= 0) {
                             ret = NVME_CMD_SIZE_LIMIT | NVME_DNR;
+                            g_free(sranges);
+                            goto exit;
+                        }
+
+                        if (!(nvme_namespace_reachable(n,
+                            dest_ns->params.nsid, ns->params.nsid))) {
+                            ret = NVME_NS_NOT_REACHABLE | NVME_DNR;
                             g_free(sranges);
                             goto exit;
                         }

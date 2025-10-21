@@ -827,4 +827,5 @@ uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len,
 
 uint16_t nvme_ns_rsv_type(NvmeCtrl *n, uint32_t nsid);
 void nvme_rsv_log_page_event(NvmeCtrl *n, uint32_t nsid, uint64_t rsv_log_type);
+bool nvme_namespace_reachable(NvmeCtrl *n, uint32_t snsid, uint32_t dnsid);
 #endif /* HW_NVME_NVME_H */
