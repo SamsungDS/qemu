@@ -9285,9 +9285,12 @@ void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns)
 static void nvme_realize(PCIDevice *pci_dev, Error **errp)
 {
     NvmeCtrl *n = NVME(pci_dev);
+    NvmeCtrlClass *nc = NVME_GET_CLASS(n);
     DeviceState *dev = DEVICE(pci_dev);
     NvmeNamespace *ns;
     NvmeCtrl *pn = NVME(pcie_sriov_get_pf(pci_dev));
+
+    nc->init_ops(n, &n->ops);
 
     if (pci_is_vf(pci_dev)) {
         /*
@@ -9534,10 +9537,15 @@ static const VMStateDescription nvme_vmstate = {
     .unmigratable = 1,
 };
 
+static void nvme_init_ops_default(NvmeCtrl *n, NvmeCtrlOps *ops)
+{
+}
+
 static void nvme_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(oc);
+    NvmeCtrlClass *nc = NVME_CLASS(oc);
 
     pc->realize = nvme_realize;
     pc->config_write = nvme_pci_write_config;
@@ -9551,6 +9559,8 @@ static void nvme_class_init(ObjectClass *oc, const void *data)
     device_class_set_props(dc, nvme_props);
     dc->vmsd = &nvme_vmstate;
     device_class_set_legacy_reset(dc, nvme_pci_reset);
+
+    nc->init_ops = nvme_init_ops_default;
 }
 
 static void nvme_instance_init(Object *obj)
@@ -9572,6 +9582,7 @@ static const TypeInfo nvme_info = {
     .instance_size = sizeof(NvmeCtrl),
     .instance_init = nvme_instance_init,
     .class_init    = nvme_class_init,
+    .class_size    = sizeof(NvmeCtrlClass),
     .interfaces = (const InterfaceInfo[]) {
         { INTERFACE_PCIE_DEVICE },
         { }

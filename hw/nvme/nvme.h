@@ -40,6 +40,7 @@
 QEMU_BUILD_BUG_ON(NVME_MAX_NAMESPACES > NVME_NSID_BROADCAST - 1);
 
 typedef struct NvmeCtrl NvmeCtrl;
+typedef struct NvmeCtrlClass NvmeCtrlClass;
 typedef struct NvmeNamespace NvmeNamespace;
 
 #define TYPE_NVME_BUS "nvme-bus"
@@ -539,6 +540,10 @@ typedef struct NvmeCQueue {
 #define TYPE_NVME "nvme"
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
+#define NVME_CLASS(klass) \
+        OBJECT_CLASS_CHECK(NvmeCtrlClass, (klass), TYPE_NVME)
+#define NVME_GET_CLASS(obj) \
+        OBJECT_GET_CLASS(NvmeCtrlClass, (obj), TYPE_NVME)
 
 typedef struct NvmeParams {
     char     *serial;
@@ -576,6 +581,15 @@ typedef struct NvmeParams {
     bool     atomic_dn;
 } NvmeParams;
 
+typedef struct NvmeCtrlOps {
+} NvmeCtrlOps;
+
+typedef struct NvmeCtrlClass {
+    PCIDeviceClass parent_class;
+
+    void (*init_ops)(NvmeCtrl *n, NvmeCtrlOps *ops);
+} NvmeCtrlClass;
+
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;
     MemoryRegion bar0;
@@ -583,6 +597,8 @@ typedef struct NvmeCtrl {
     NvmeBar      bar;
     NvmeParams   params;
     NvmeBus      bus;
+
+    NvmeCtrlOps ops;
 
     uint16_t    cntlid;
     bool        qs_created;
