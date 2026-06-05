@@ -582,7 +582,18 @@ typedef struct NvmeParams {
 } NvmeParams;
 
 typedef struct NvmeCtrlOps {
+    void (*init_acs)(NvmeCtrl *n);
+    void (*init_iocs)(NvmeCtrl *n);
 } NvmeCtrlOps;
+
+typedef struct NvmeCmdDef {
+    uint16_t (*handle)(NvmeCtrl *n, NvmeRequest *req);
+    uint32_t cse;
+} NvmeCmdDef;
+
+typedef struct NvmeCmdSet {
+    NvmeCmdDef cmds[256];
+} NvmeCmdSet;
 
 typedef struct NvmeCtrlClass {
     PCIDeviceClass parent_class;
@@ -621,12 +632,16 @@ typedef struct NvmeCtrl {
     bool        dbbuf_enabled;
 
     struct {
-        uint32_t acs[256];
+        NvmeCmdSet acs;
         struct {
-            uint32_t nvm[256];
-            uint32_t zoned[256];
+            NvmeCmdSet nvm;
+            NvmeCmdSet zoned;
         } iocs;
-    } cse;
+        /* to mark a I/O command set as supported,
+         * install a pointer to the iocs at the
+         * index in the table corresponding to its csi */
+        NvmeCmdSet *iocss[256];
+    } cs;
 
     struct {
         MemoryRegion mem;

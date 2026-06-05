@@ -268,59 +268,14 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
 };
 
-static const uint32_t nvme_cse_acs_default[256] = {
-    [NVME_ADM_CMD_DELETE_SQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_CREATE_SQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_GET_LOG_PAGE]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_DELETE_CQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_CREATE_CQ]        = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_IDENTIFY]         = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_ABORT]            = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_SET_FEATURES]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_GET_FEATURES]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_ASYNC_EV_REQ]     = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_NS_ATTACHMENT]    = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_NIC |
-                                      NVME_CMD_EFF_CCC,
-    [NVME_ADM_CMD_FORMAT_NVM]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_ADM_CMD_DIRECTIVE_RECV]   = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_DIRECTIVE_SEND]   = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_SECURITY_SEND]    = NVME_CMD_EFF_CSUPP,
-    [NVME_ADM_CMD_SECURITY_RECV]    = NVME_CMD_EFF_CSUPP,
-};
-
-static const uint32_t nvme_cse_iocs_nvm_default[256] = {
-    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE_ZEROES]         = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_DSM]                  = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_VERIFY]               = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_COPY]                 = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_COMPARE]              = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_IO_MGMT_RECV]         = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_IO_MGMT_SEND]         = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-};
-
-static const uint32_t nvme_cse_iocs_zoned_default[256] = {
-    [NVME_CMD_FLUSH]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE_ZEROES]         = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_WRITE]                = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_READ]                 = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_DSM]                  = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_VERIFY]               = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_COPY]                 = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_COMPARE]              = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_IO_MGMT_RECV]         = NVME_CMD_EFF_CSUPP,
-    [NVME_CMD_IO_MGMT_SEND]         = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-
-    [NVME_CMD_ZONE_APPEND]          = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_ZONE_MGMT_SEND]       = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
-    [NVME_CMD_ZONE_MGMT_RECV]       = NVME_CMD_EFF_CSUPP,
-};
-
 static void nvme_process_sq(void *opaque);
 static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst);
 static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n);
+
+static inline bool nvme_cssup(NvmeCmdSet *cs, uint8_t opcode)
+{
+    return cs && cs->cmds[opcode].cse & NVME_CMD_EFF_CSUPP;
+}
 
 static uint16_t nvme_sqid(NvmeRequest *req)
 {
@@ -4608,59 +4563,72 @@ static uint16_t nvme_io_mgmt_send(NvmeCtrl *n, NvmeRequest *req)
     };
 }
 
-static uint16_t __nvme_io_cmd_nvm(NvmeCtrl *n, NvmeRequest *req)
+static void nvme_iocs_nvm_ioctrl23_m(NvmeCmdSet *tbl)
 {
-    switch (req->cmd.opcode) {
-    case NVME_CMD_WRITE:
-        return nvme_write(n, req);
-    case NVME_CMD_READ:
-        return nvme_read(n, req);
-    case NVME_CMD_COMPARE:
-        return nvme_compare(n, req);
-    case NVME_CMD_WRITE_ZEROES:
-        return nvme_write_zeroes(n, req);
-    case NVME_CMD_DSM:
-        return nvme_dsm(n, req);
-    case NVME_CMD_VERIFY:
-        return nvme_verify(n, req);
-    case NVME_CMD_COPY:
-        return nvme_copy(n, req);
-    case NVME_CMD_IO_MGMT_RECV:
-        return nvme_io_mgmt_recv(n, req);
-    case NVME_CMD_IO_MGMT_SEND:
-        return nvme_io_mgmt_send(n, req);
-    }
-
-    g_assert_not_reached();
+    tbl->cmds[NVME_CMD_FLUSH] = (NvmeCmdDef) {
+        /* TODO: tp4193 only mentions that CSUPP should be set */
+        .cse = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+        .handle = nvme_flush,
+    };
+    tbl->cmds[NVME_CMD_WRITE] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+        .handle = nvme_write,
+    };
+    tbl->cmds[NVME_CMD_READ] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_read,
+    };
 }
 
-static uint16_t nvme_io_cmd_nvm(NvmeCtrl *n, NvmeRequest *req)
+static void nvme_iocs_nvm_default(NvmeCmdSet *tbl)
 {
-    if (!(n->cse.iocs.nvm[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
-        trace_pci_nvme_err_invalid_opc(req->cmd.opcode);
-        return NVME_INVALID_OPCODE | NVME_DNR;
-    }
-
-    return __nvme_io_cmd_nvm(n, req);
+    nvme_iocs_nvm_ioctrl23_m(tbl);
+    tbl->cmds[NVME_CMD_WRITE_ZEROES] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+        .handle = nvme_write_zeroes,
+    };
+    tbl->cmds[NVME_CMD_DSM] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+        .handle = nvme_dsm,
+    };
+    tbl->cmds[NVME_CMD_VERIFY] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_verify,
+    };
+    tbl->cmds[NVME_CMD_COPY] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_copy,
+    };
+    tbl->cmds[NVME_CMD_COMPARE] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_compare,
+    };
+    tbl->cmds[NVME_CMD_IO_MGMT_RECV] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_io_mgmt_recv
+    };
+    tbl->cmds[NVME_CMD_IO_MGMT_SEND] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+        .handle = nvme_io_mgmt_send,
+    };
 }
 
-static uint16_t nvme_io_cmd_zoned(NvmeCtrl *n, NvmeRequest *req)
+static void nvme_iocs_zoned_default(NvmeCmdSet *tbl)
 {
-    if (!(n->cse.iocs.zoned[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
-        trace_pci_nvme_err_invalid_opc(req->cmd.opcode);
-        return NVME_INVALID_OPCODE | NVME_DNR;
-    }
+    nvme_iocs_nvm_default(tbl);
 
-    switch (req->cmd.opcode) {
-    case NVME_CMD_ZONE_APPEND:
-        return nvme_zone_append(n, req);
-    case NVME_CMD_ZONE_MGMT_SEND:
-        return nvme_zone_mgmt_send(n, req);
-    case NVME_CMD_ZONE_MGMT_RECV:
-        return nvme_zone_mgmt_recv(n, req);
-    }
-
-    return __nvme_io_cmd_nvm(n, req);
+    tbl->cmds[NVME_CMD_ZONE_APPEND] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+        .handle = nvme_zone_append,
+    };
+    tbl->cmds[NVME_CMD_ZONE_MGMT_SEND] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+        .handle = nvme_zone_mgmt_send,
+    };
+    tbl->cmds[NVME_CMD_ZONE_MGMT_RECV] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_zone_mgmt_recv,
+    };
 }
 
 static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
@@ -4714,14 +4682,15 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeRequest *req)
 
     req->ns = ns;
 
-    switch (ns->csi) {
-    case NVME_CSI_NVM:
-        return nvme_io_cmd_nvm(n, req);
-    case NVME_CSI_ZONED:
-        return nvme_io_cmd_zoned(n, req);
+    NvmeCmdSet *cs = n->cs.iocss[ns->csi];
+    g_assert(cs != NULL);
+
+    if (!nvme_cssup(cs, req->cmd.opcode)) {
+         trace_pci_nvme_err_invalid_opc(req->cmd.opcode);
+         return NVME_INVALID_OPCODE | NVME_DNR;
     }
 
-    g_assert_not_reached();
+    return cs->cmds[req->cmd.opcode].handle(n, req);
 }
 
 static void nvme_cq_notifier(EventNotifier *e)
@@ -5180,7 +5149,7 @@ static uint16_t nvme_cmd_effects(NvmeCtrl *n, uint8_t csi, uint32_t buf_len,
                                  uint64_t off, NvmeRequest *req)
 {
     NvmeEffectsLog log = {};
-    const uint32_t *iocs = NULL;
+    NvmeCmdSet *iocs = NULL;
     uint32_t trans_len;
 
     if (off >= sizeof(log)) {
@@ -5190,26 +5159,24 @@ static uint16_t nvme_cmd_effects(NvmeCtrl *n, uint8_t csi, uint32_t buf_len,
 
     switch (NVME_CC_CSS(ldl_le_p(&n->bar.cc))) {
     case NVME_CC_CSS_NVM:
-        iocs = n->cse.iocs.nvm;
+        iocs = &n->cs.iocs.nvm;
         break;
 
     case NVME_CC_CSS_ALL:
-        switch (csi) {
-        case NVME_CSI_NVM:
-            iocs = n->cse.iocs.nvm;
-            break;
-        case NVME_CSI_ZONED:
-            iocs = n->cse.iocs.zoned;
-            break;
+        if (n->cs.iocss[csi]) {
+            iocs = n->cs.iocss[csi];
         }
-
         break;
     }
 
-    memcpy(log.acs, n->cse.acs, sizeof(log.acs));
+    for (int i = 0; i < 256; i++) {
+        log.acs[i] = n->cs.acs.cmds[i].cse;
+    }
 
     if (iocs) {
-        memcpy(log.iocs, iocs, sizeof(log.iocs));
+        for (int i = 0; i < 256; i++) {
+            log.iocs[i] = iocs->cmds[i].cse;
+        }
     }
 
     trans_len = MIN(sizeof(log) - off, buf_len);
@@ -7262,7 +7229,7 @@ static uint16_t nvme_virt_mngmt(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
-static uint16_t nvme_dbbuf_config(NvmeCtrl *n, const NvmeRequest *req)
+static uint16_t nvme_dbbuf_config(NvmeCtrl *n, NvmeRequest *req)
 {
     PCIDevice *pci = PCI_DEVICE(n);
     uint64_t dbs_addr = le64_to_cpu(req->cmd.dptr.prp1);
@@ -7575,12 +7542,97 @@ static uint16_t nvme_directive_receive(NvmeCtrl *n, NvmeRequest *req)
     }
 }
 
+static void nvme_cse_acs_ioctrl23_m(NvmeCmdSet *tbl)
+{
+    /* enable operations mandatory for a I/O controller
+     * compliant with the v2.3 base specification */
+    tbl->cmds[NVME_ADM_CMD_DELETE_SQ] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_del_sq
+    };
+    tbl->cmds[NVME_ADM_CMD_CREATE_SQ] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_create_sq,
+    };
+    tbl->cmds[NVME_ADM_CMD_GET_LOG_PAGE] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_get_log,
+    };
+    tbl->cmds[NVME_ADM_CMD_DELETE_CQ] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_del_cq,
+    };
+    tbl->cmds[NVME_ADM_CMD_CREATE_CQ] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_create_cq,
+    };
+    tbl->cmds[NVME_ADM_CMD_IDENTIFY] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_identify,
+    };
+    tbl->cmds[NVME_ADM_CMD_ABORT] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_abort,
+    };
+    tbl->cmds[NVME_ADM_CMD_SET_FEATURES] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_set_feature,
+    };
+    tbl->cmds[NVME_ADM_CMD_GET_FEATURES] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_get_feature,
+    };
+    tbl->cmds[NVME_ADM_CMD_ASYNC_EV_REQ] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_aer,
+    };
+}
+
+static void nvme_cse_acs_defaults(NvmeCmdSet *tbl)
+{
+    /* TODO: remove static nvme_cse_acs_default when done */
+    /* TODO: *consider* if we need n->ops entries for any of this (I think not) */
+    nvme_cse_acs_ioctrl23_m(tbl);
+
+    tbl->cmds[NVME_ADM_CMD_NS_ATTACHMENT] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_NIC |
+               NVME_CMD_EFF_CCC,
+        .handle = nvme_ns_attachment,
+    };
+    tbl->cmds[NVME_ADM_CMD_DIRECTIVE_SEND] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_directive_send,
+    };
+    tbl->cmds[NVME_ADM_CMD_VIRT_MNGMT] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_virt_mngmt,
+    };
+    tbl->cmds[NVME_ADM_CMD_DIRECTIVE_RECV] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_directive_receive,
+    };
+    tbl->cmds[NVME_ADM_CMD_FORMAT_NVM] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_LBCC,
+        .handle = nvme_format,
+    };
+    tbl->cmds[NVME_ADM_CMD_SECURITY_SEND] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_security_send,
+    };
+    tbl->cmds[NVME_ADM_CMD_SECURITY_RECV] = (NvmeCmdDef) {
+        .cse = NVME_CMD_EFF_CSUPP,
+        .handle = nvme_security_receive,
+    };
+}
+
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
 {
     trace_pci_nvme_admin_cmd(nvme_cid(req), nvme_sqid(req), req->cmd.opcode,
                              nvme_adm_opc_str(req->cmd.opcode));
 
-    if (!(n->cse.acs[req->cmd.opcode] & NVME_CMD_EFF_CSUPP)) {
+    NvmeCmdDef def = n->cs.acs.cmds[req->cmd.opcode];
+
+    if (!(def.cse & NVME_CMD_EFF_CSUPP) || unlikely(!def.handle)) {
         trace_pci_nvme_err_invalid_admin_opc(req->cmd.opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
     }
@@ -7594,48 +7646,7 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeRequest *req)
         return NVME_INVALID_FIELD;
     }
 
-    switch (req->cmd.opcode) {
-    case NVME_ADM_CMD_DELETE_SQ:
-        return nvme_del_sq(n, req);
-    case NVME_ADM_CMD_CREATE_SQ:
-        return nvme_create_sq(n, req);
-    case NVME_ADM_CMD_GET_LOG_PAGE:
-        return nvme_get_log(n, req);
-    case NVME_ADM_CMD_DELETE_CQ:
-        return nvme_del_cq(n, req);
-    case NVME_ADM_CMD_CREATE_CQ:
-        return nvme_create_cq(n, req);
-    case NVME_ADM_CMD_IDENTIFY:
-        return nvme_identify(n, req);
-    case NVME_ADM_CMD_ABORT:
-        return nvme_abort(n, req);
-    case NVME_ADM_CMD_SET_FEATURES:
-        return nvme_set_feature(n, req);
-    case NVME_ADM_CMD_GET_FEATURES:
-        return nvme_get_feature(n, req);
-    case NVME_ADM_CMD_ASYNC_EV_REQ:
-        return nvme_aer(n, req);
-    case NVME_ADM_CMD_NS_ATTACHMENT:
-        return nvme_ns_attachment(n, req);
-    case NVME_ADM_CMD_VIRT_MNGMT:
-        return nvme_virt_mngmt(n, req);
-    case NVME_ADM_CMD_DBBUF_CONFIG:
-        return nvme_dbbuf_config(n, req);
-    case NVME_ADM_CMD_FORMAT_NVM:
-        return nvme_format(n, req);
-    case NVME_ADM_CMD_DIRECTIVE_SEND:
-        return nvme_directive_send(n, req);
-    case NVME_ADM_CMD_DIRECTIVE_RECV:
-        return nvme_directive_receive(n, req);
-    case NVME_ADM_CMD_SECURITY_SEND:
-        return nvme_security_send(n, req);
-    case NVME_ADM_CMD_SECURITY_RECV:
-        return nvme_security_receive(n, req);
-    default:
-        g_assert_not_reached();
-    }
-
-    return NVME_INVALID_OPCODE | NVME_DNR;
+    return def.handle(n, req);
 }
 
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
@@ -9101,6 +9112,35 @@ static void nvme_init_subnqn(NvmeCtrl *n)
     }
 }
 
+static void nvme_init_ctrl_acs_default(NvmeCtrl *n)
+{
+    memset(&n->cs.acs, 0, sizeof(n->cs.acs));
+    nvme_cse_acs_defaults(&n->cs.acs);
+    if (n->params.dbcs) {
+        n->cs.acs.cmds[NVME_ADM_CMD_DBBUF_CONFIG] = (NvmeCmdDef) {
+            .cse = NVME_CMD_EFF_CSUPP,
+            .handle = nvme_dbbuf_config,
+        };
+    }
+    if (n->params.sriov_max_vfs) {
+        n->cs.acs.cmds[NVME_ADM_CMD_VIRT_MNGMT] = (NvmeCmdDef) {
+            .cse = NVME_CMD_EFF_CSUPP,
+            .handle = nvme_virt_mngmt,
+        };
+    }
+}
+
+static void nvme_init_ctrl_iocs_default(NvmeCtrl *n)
+{
+    memset(&n->cs.iocs.nvm, 0, sizeof(n->cs.iocs.nvm));
+    nvme_iocs_nvm_default(&n->cs.iocs.nvm);
+    n->cs.iocss[NVME_CSI_NVM] = &n->cs.iocs.nvm;
+
+    memset(n->cs.iocs.zoned, 0, sizeof(n->cs.iocs.zoned));
+    nvme_iocs_zoned_default(n->cs.iocs.zoned);
+    n->cs.iocss[NVME_CSI_ZONED] = &n->cs.iocs.zoned;
+}
+
 static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 {
     NvmeIdCtrl *id = &n->id_ctrl;
@@ -9110,10 +9150,8 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     uint32_t ctratt = le32_to_cpu(id->ctratt);
     uint16_t oacs;
 
-    memcpy(n->cse.acs, nvme_cse_acs_default, sizeof(n->cse.acs));
-    memcpy(n->cse.iocs.nvm, nvme_cse_iocs_nvm_default, sizeof(n->cse.iocs.nvm));
-    memcpy(n->cse.iocs.zoned, nvme_cse_iocs_zoned_default,
-           sizeof(n->cse.iocs.zoned));
+    n->ops.init_acs(n);
+    n->ops.init_iocs(n);
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
@@ -9151,16 +9189,12 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DIRECTIVES |
            NVME_OACS_SECURITY;
 
-    if (n->params.dbcs) {
+    if (nvme_cssup(&n->cs.acs, NVME_ADM_CMD_DBBUF_CONFIG)) {
         oacs |= NVME_OACS_DBCS;
-
-        n->cse.acs[NVME_ADM_CMD_DBBUF_CONFIG] = NVME_CMD_EFF_CSUPP;
     }
 
-    if (n->params.sriov_max_vfs) {
+    if (nvme_cssup(&n->cs.acs, NVME_ADM_CMD_VIRT_MNGMT)) {
         oacs |= NVME_OACS_VMS;
-
-        n->cse.acs[NVME_ADM_CMD_VIRT_MNGMT] = NVME_CMD_EFF_CSUPP;
     }
 
     id->oacs = cpu_to_le16(oacs);
@@ -9539,6 +9573,8 @@ static const VMStateDescription nvme_vmstate = {
 
 static void nvme_init_ops_default(NvmeCtrl *n, NvmeCtrlOps *ops)
 {
+    ops->init_acs = nvme_init_ctrl_acs_default;
+    ops->init_iocs = nvme_init_ctrl_iocs_default;
 }
 
 static void nvme_class_init(ObjectClass *oc, const void *data)
