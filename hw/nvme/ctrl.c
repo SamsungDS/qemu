@@ -9136,9 +9136,43 @@ static void nvme_init_ctrl_iocs_default(NvmeCtrl *n)
     nvme_iocs_nvm_default(&n->cs.iocs.nvm);
     n->cs.iocss[NVME_CSI_NVM] = &n->cs.iocs.nvm;
 
-    memset(n->cs.iocs.zoned, 0, sizeof(n->cs.iocs.zoned));
-    nvme_iocs_zoned_default(n->cs.iocs.zoned);
+    memset(&n->cs.iocs.zoned, 0, sizeof(n->cs.iocs.zoned));
+    nvme_iocs_zoned_default(&n->cs.iocs.zoned);
     n->cs.iocss[NVME_CSI_ZONED] = &n->cs.iocs.zoned;
+}
+
+static void nvme_init_ctrl_oncs_iocss(NvmeCtrl *n, uint16_t *oncs)
+{
+    /* checks supported NVM cs commands and sets appropriate ONCS bits */
+    NvmeCmdSet *nvm = n->cs.iocss[NVME_CSI_NVM];
+
+    if (!nvm) {
+        return;
+    }
+
+    if (nvm->cmds[NVME_CMD_COMPARE].cse & NVME_CMD_EFF_CSUPP) {
+        *oncs |= NVME_ONCS_COMPARE;
+    }
+
+    if (nvm->cmds[NVME_CMD_WRITE_UNCOR].cse & NVME_CMD_EFF_CSUPP) {
+        *oncs |= NVME_ONCS_WRITE_UNCORR;
+    }
+
+    if (nvm->cmds[NVME_CMD_DSM].cse & NVME_CMD_EFF_CSUPP) {
+        *oncs |= NVME_ONCS_DSM;
+    }
+
+    if (nvm->cmds[NVME_CMD_WRITE_ZEROES].cse & NVME_CMD_EFF_CSUPP) {
+        *oncs |= NVME_ONCS_WRITE_ZEROES;
+    }
+
+    if (nvm->cmds[NVME_CMD_VERIFY].cse & NVME_CMD_EFF_CSUPP) {
+        *oncs |= NVME_ONCS_VERIFY;
+    }
+
+    if (nvm->cmds[NVME_CMD_COPY].cse & NVME_CMD_EFF_CSUPP) {
+        *oncs |= NVME_ONCS_COPY | NVME_ONCS_NVMCSA | NVME_ONCS_NVMAFC;
+    }
 }
 
 static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
@@ -9148,7 +9182,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     uint64_t cap = ldq_le_p(&n->bar.cap);
     NvmeSecCtrlEntry *sctrl = nvme_sctrl(n);
     uint32_t ctratt = le32_to_cpu(id->ctratt);
-    uint16_t oacs;
+    uint16_t oacs, oncs = 0;
 
     n->ops.init_acs(n);
     n->ops.init_iocs(n);
@@ -9224,10 +9258,10 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->sqes = (NVME_SQES << 4) | NVME_SQES;
     id->cqes = (NVME_CQES << 4) | NVME_CQES;
     id->nn = cpu_to_le32(NVME_MAX_NAMESPACES);
-    id->oncs = cpu_to_le16(NVME_ONCS_WRITE_ZEROES | NVME_ONCS_TIMESTAMP |
-                           NVME_ONCS_FEATURES | NVME_ONCS_DSM |
-                           NVME_ONCS_COMPARE | NVME_ONCS_COPY |
-                           NVME_ONCS_NVMCSA | NVME_ONCS_NVMAFC);
+
+    oncs = NVME_ONCS_TIMESTAMP | NVME_ONCS_FEATURES;
+    nvme_init_ctrl_oncs_iocss(n, &oncs);
+    id->oncs = cpu_to_le16(oncs);
 
     /*
      * NOTE: If this device ever supports a command set that does NOT use 0x0
