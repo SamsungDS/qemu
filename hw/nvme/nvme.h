@@ -584,7 +584,14 @@ typedef struct NvmeParams {
 typedef struct NvmeCtrlOps {
     void (*init_acs)(NvmeCtrl *n);
     void (*init_iocs)(NvmeCtrl *n);
+    void (*init_features)(NvmeCtrl *n);
 } NvmeCtrlOps;
+
+typedef struct NvmeFeatureDef {
+    uint16_t (*get)(NvmeCtrl *n, NvmeRequest *req, bool defval);
+    uint16_t (*set)(NvmeCtrl *n, NvmeRequest *req);
+    uint32_t cap;
+} NvmeFeatureDef;
 
 typedef struct NvmeCmdDef {
     uint16_t (*handle)(NvmeCtrl *n, NvmeRequest *req);
@@ -685,6 +692,7 @@ typedef struct NvmeCtrl {
 
         uint32_t                async_config;
         NvmeHostBehaviorSupport hbs;
+        NvmeFeatureDef          defs[NVME_FID_MAX];
     } features;
 
     NvmePriCtrlCap  pri_ctrl_cap;

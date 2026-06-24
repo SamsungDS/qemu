@@ -236,41 +236,14 @@
             " in %s: " fmt "\n", __func__, ## __VA_ARGS__); \
     } while (0)
 
-static const bool nvme_feature_support[NVME_FID_MAX] = {
-    [NVME_ARBITRATION]              = true,
-    [NVME_POWER_MANAGEMENT]         = true,
-    [NVME_TEMPERATURE_THRESHOLD]    = true,
-    [NVME_ERROR_RECOVERY]           = true,
-    [NVME_VOLATILE_WRITE_CACHE]     = true,
-    [NVME_NUMBER_OF_QUEUES]         = true,
-    [NVME_INTERRUPT_COALESCING]     = true,
-    [NVME_INTERRUPT_VECTOR_CONF]    = true,
-    [NVME_WRITE_ATOMICITY]          = true,
-    [NVME_ASYNCHRONOUS_EVENT_CONF]  = true,
-    [NVME_TIMESTAMP]                = true,
-    [NVME_HOST_BEHAVIOR_SUPPORT]    = true,
-    [NVME_COMMAND_SET_PROFILE]      = true,
-    [NVME_FDP_MODE]                 = true,
-    [NVME_FDP_EVENTS]               = true,
-};
-
-static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
-    [NVME_TEMPERATURE_THRESHOLD]    = NVME_FEAT_CAP_CHANGE,
-    [NVME_ERROR_RECOVERY]           = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
-    [NVME_VOLATILE_WRITE_CACHE]     = NVME_FEAT_CAP_CHANGE,
-    [NVME_NUMBER_OF_QUEUES]         = NVME_FEAT_CAP_CHANGE,
-    [NVME_WRITE_ATOMICITY]          = NVME_FEAT_CAP_CHANGE,
-    [NVME_ASYNCHRONOUS_EVENT_CONF]  = NVME_FEAT_CAP_CHANGE,
-    [NVME_TIMESTAMP]                = NVME_FEAT_CAP_CHANGE,
-    [NVME_HOST_BEHAVIOR_SUPPORT]    = NVME_FEAT_CAP_CHANGE,
-    [NVME_COMMAND_SET_PROFILE]      = NVME_FEAT_CAP_CHANGE,
-    [NVME_FDP_MODE]                 = NVME_FEAT_CAP_CHANGE,
-    [NVME_FDP_EVENTS]               = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
-};
-
 static void nvme_process_sq(void *opaque);
 static void nvme_ctrl_reset(NvmeCtrl *n, NvmeResetType rst);
 static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n);
+
+static inline bool nvme_feature_supported(NvmeCtrl *n, uint8_t fid)
+{
+    return n->features.defs[fid].get != NULL;
+}
 
 static inline bool nvme_cssup(NvmeCmdSet *cs, uint8_t opcode)
 {
@@ -6154,30 +6127,167 @@ static inline uint64_t nvme_get_timestamp(const NvmeCtrl *n)
     return cpu_to_le64(ts.all);
 }
 
-static uint16_t nvme_get_feature_timestamp(NvmeCtrl *n, NvmeRequest *req)
+static uint16_t nvme_get_feature_timestamp(NvmeCtrl *n, NvmeRequest *req, bool defval)
 {
     uint64_t timestamp = nvme_get_timestamp(n);
 
     return nvme_c2h(n, (uint8_t *)&timestamp, sizeof(timestamp), req);
 }
 
-static int nvme_get_feature_fdp(NvmeCtrl *n, uint32_t endgrpid,
-                                uint32_t *result)
+static uint16_t nvme_get_feature_arbitration(NvmeCtrl *n, NvmeRequest *req, bool defval)
 {
-    *result = 0;
+    req->cqe.result = cpu_to_le32(NVME_ARB_AB_NOLIMIT);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_get_feature_temp_threshold(NvmeCtrl *n, NvmeRequest *req, bool defval)
+{
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+    uint32_t result = 0;
+
+    /*
+     * The controller only implements the Composite Temperature sensor, so
+     * return 0 for all other sensors.
+     */
+    if (NVME_TEMP_TMPSEL(dw11) != NVME_TEMP_TMPSEL_COMPOSITE) {
+        goto out;
+    }
+
+    if (defval) {
+        if (NVME_TEMP_THSEL(dw11) == NVME_TEMP_THSEL_OVER) {
+            result = NVME_TEMPERATURE_WARNING;
+        }
+        goto out;
+    }
+
+    switch (NVME_TEMP_THSEL(dw11)) {
+    case NVME_TEMP_THSEL_OVER:
+        result = n->features.temp_thresh_hi;
+        break;
+    case NVME_TEMP_THSEL_UNDER:
+        result = n->features.temp_thresh_low;
+        break;
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+out:
+    req->cqe.result = cpu_to_le32(result);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_get_feature_errrec(NvmeCtrl *n, NvmeRequest *req, bool defval)
+{
+    NvmeNamespace *ns = NULL;
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+
+    if (unlikely(defval)) {
+        return NVME_SUCCESS;
+    }
+
+    ns = nvme_ns(n, nsid);
+    assert(ns); /* caller already checked */
+
+    req->cqe.result = cpu_to_le32(ns->features.err_rec);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_get_feature_vwc(NvmeCtrl *n, NvmeRequest *req, bool defval)
+{
+    NvmeNamespace *ns = NULL;
+    uint32_t result = 0;
+
+    if (unlikely(defval)) {
+        return NVME_SUCCESS;
+    }
+
+    for (int i = 1; i <= NVME_MAX_NAMESPACES; i++) {
+        ns = nvme_ns(n, i);
+        if (!ns) {
+            continue;
+        }
+
+        result = blk_enable_write_cache(ns->blkconf.blk);
+        if (result) {
+            req->cqe.result = cpu_to_le32(result);
+            break;
+        }
+    }
+
+    trace_pci_nvme_getfeat_vwcache(result ? "enabled" : "disabled");
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_get_feature_numqs(NvmeCtrl *n, NvmeRequest *req, bool defval)
+{
+    uint32_t result = (n->conf_ioqpairs - 1) | ((n->conf_ioqpairs - 1) << 16);
+    req->cqe.result = cpu_to_le32(result);
+    trace_pci_nvme_getfeat_numq(result);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_get_feature_int_vec_conf(NvmeCtrl *n, NvmeRequest *req, bool defval)
+{
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+    uint16_t iv = dw11 & 0xffff;
+    uint32_t result = 0;
+
+    if (iv >= n->conf_ioqpairs + 1) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    result = iv;
+    if (iv == n->admin_cq.vector) {
+        result |= NVME_INTVC_NOCOALESCING;
+    }
+
+    req->cqe.result = cpu_to_le32(result);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_get_feature_write_atomicity(NvmeCtrl *n, NvmeRequest *req,
+                                                 bool defval)
+{
+    req->cqe.result = cpu_to_le32(n->dn);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_get_feature_aec(NvmeCtrl *n, NvmeRequest *req, bool defval)
+{
+    if (likely(!defval)) {
+        req->cqe.result = cpu_to_le32(n->features.async_config);
+    }
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_get_feature_hbs(NvmeCtrl *n, NvmeRequest *req, bool defval)
+{
+        return nvme_c2h(n, (uint8_t *)&n->features.hbs,
+                        sizeof(n->features.hbs), req);
+}
+
+static uint16_t nvme_get_feature_fdp(NvmeCtrl *n, NvmeRequest *req, bool defval)
+{
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+    uint16_t endgrpid = dw11 & 0xff;
+    uint32_t result = 0;
+
+    if (endgrpid != 0x1) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
 
     if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    *result = FIELD_DP16(0, FEAT_FDP, FDPE, 1);
-    *result = FIELD_DP16(*result, FEAT_FDP, CONF_NDX, 0);
+    result = FIELD_DP16(0, FEAT_FDP, FDPE, 1);
+    result = FIELD_DP16(result, FEAT_FDP, CONF_NDX, 0);
+    req->cqe.result = cpu_to_le32(result);
 
     return NVME_SUCCESS;
 }
 
-static uint16_t nvme_get_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
-                                            NvmeRequest *req, uint32_t *result)
+static uint16_t nvme_get_feature_fdp_events(NvmeCtrl *n, NvmeRequest *req, bool defval)
 {
     NvmeCmd *cmd = &req->cmd;
     uint32_t cdw11 = le32_to_cpu(cmd->cdw11);
@@ -6190,6 +6300,14 @@ static uint16_t nvme_get_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
     g_autofree NvmeFdpEventDescr *s_events = g_malloc0(s_events_siz);
     NvmeRuHandle *ruh;
     NvmeFdpEventDescr *s_event;
+    NvmeNamespace *ns = NULL;
+
+    if (unlikely(defval)) {
+        return NVME_SUCCESS;
+    }
+
+    ns = nvme_ns(n, cmd->nsid);
+    assert(ns); /* caller checked */
 
     if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
         return NVME_FDP_DISABLED | NVME_DNR;
@@ -6235,7 +6353,12 @@ static uint16_t nvme_get_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
         return ret;
     }
 
-    *result = nentries;
+    req->cqe.result = cpu_to_le32(nentries);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_get_feature_noop(NvmeCtrl *n, NvmeRequest *req, bool defval)
+{
     return NVME_SUCCESS;
 }
 
@@ -6245,25 +6368,20 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
     uint32_t dw10 = le32_to_cpu(cmd->cdw10);
     uint32_t dw11 = le32_to_cpu(cmd->cdw11);
     uint32_t nsid = le32_to_cpu(cmd->nsid);
-    uint32_t result = 0;
     uint8_t fid = NVME_GETSETFEAT_FID(dw10);
     NvmeGetFeatureSelect sel = NVME_GETFEAT_SELECT(dw10);
-    uint16_t iv;
-    NvmeNamespace *ns;
-    int i;
-    uint16_t endgrpid = 0, ret = NVME_SUCCESS;
-
-    static const uint32_t nvme_feature_default[NVME_FID_MAX] = {
-        [NVME_ARBITRATION] = NVME_ARB_AB_NOLIMIT,
-    };
+    NvmeFeatureDef *feat = NULL;
+    bool defval = false;
 
     trace_pci_nvme_getfeat(nvme_cid(req), nsid, fid, sel, dw11);
 
-    if (!nvme_feature_support[fid]) {
+    if (!nvme_feature_supported(n, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
+    feat = &n->features.defs[fid];
+
+    if (feat->cap & NVME_FEAT_CAP_NS) {
         if (!nvme_nsid_valid(n, nsid) || nsid == NVME_NSID_BROADCAST) {
             /*
              * The Reservation Notification Mask and Reservation Persistence
@@ -6281,158 +6399,21 @@ static uint16_t nvme_get_feature(NvmeCtrl *n, NvmeRequest *req)
     }
 
     switch (sel) {
-    case NVME_GETFEAT_SELECT_CURRENT:
-        break;
-    case NVME_GETFEAT_SELECT_SAVED:
-        /* no features are saveable by the controller; fallthrough */
-    case NVME_GETFEAT_SELECT_DEFAULT:
-        goto defaults;
-    case NVME_GETFEAT_SELECT_CAP:
-        result = nvme_feature_cap[fid];
-        goto out;
-    }
-
-    switch (fid) {
-    case NVME_TEMPERATURE_THRESHOLD:
-        result = 0;
-
-        /*
-         * The controller only implements the Composite Temperature sensor, so
-         * return 0 for all other sensors.
-         */
-        if (NVME_TEMP_TMPSEL(dw11) != NVME_TEMP_TMPSEL_COMPOSITE) {
-            goto out;
-        }
-
-        switch (NVME_TEMP_THSEL(dw11)) {
-        case NVME_TEMP_THSEL_OVER:
-            result = n->features.temp_thresh_hi;
-            goto out;
-        case NVME_TEMP_THSEL_UNDER:
-            result = n->features.temp_thresh_low;
-            goto out;
-        }
-
-        return NVME_INVALID_FIELD | NVME_DNR;
-    case NVME_ERROR_RECOVERY:
-        if (!nvme_nsid_valid(n, nsid)) {
-            return NVME_INVALID_NSID | NVME_DNR;
-        }
-
-        ns = nvme_ns(n, nsid);
-        if (unlikely(!ns)) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        result = ns->features.err_rec;
-        goto out;
-    case NVME_VOLATILE_WRITE_CACHE:
-        result = 0;
-        for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
-            ns = nvme_ns(n, i);
-            if (!ns) {
-                continue;
-            }
-
-            result = blk_enable_write_cache(ns->blkconf.blk);
-            if (result) {
-                break;
-            }
-        }
-        trace_pci_nvme_getfeat_vwcache(result ? "enabled" : "disabled");
-        goto out;
-    case NVME_ASYNCHRONOUS_EVENT_CONF:
-        result = n->features.async_config;
-        goto out;
-    case NVME_TIMESTAMP:
-        return nvme_get_feature_timestamp(n, req);
-    case NVME_HOST_BEHAVIOR_SUPPORT:
-        return nvme_c2h(n, (uint8_t *)&n->features.hbs,
-                        sizeof(n->features.hbs), req);
-    case NVME_FDP_MODE:
-        endgrpid = dw11 & 0xff;
-
-        if (endgrpid != 0x1) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        ret = nvme_get_feature_fdp(n, endgrpid, &result);
-        if (ret) {
-            return ret;
-        }
-        goto out;
-    case NVME_FDP_EVENTS:
-        if (!nvme_nsid_valid(n, nsid)) {
-            return NVME_INVALID_NSID | NVME_DNR;
-        }
-
-        ns = nvme_ns(n, nsid);
-        if (unlikely(!ns)) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        ret = nvme_get_feature_fdp_events(n, ns, req, &result);
-        if (ret) {
-            return ret;
-        }
-        goto out;
-    default:
-        break;
-    }
-
-defaults:
-    switch (fid) {
-    case NVME_TEMPERATURE_THRESHOLD:
-        result = 0;
-
-        if (NVME_TEMP_TMPSEL(dw11) != NVME_TEMP_TMPSEL_COMPOSITE) {
+        case NVME_GETFEAT_SELECT_CURRENT:
             break;
-        }
-
-        if (NVME_TEMP_THSEL(dw11) == NVME_TEMP_THSEL_OVER) {
-            result = NVME_TEMPERATURE_WARNING;
-        }
-
-        break;
-    case NVME_NUMBER_OF_QUEUES:
-        result = (n->conf_ioqpairs - 1) | ((n->conf_ioqpairs - 1) << 16);
-        trace_pci_nvme_getfeat_numq(result);
-        break;
-    case NVME_INTERRUPT_VECTOR_CONF:
-        iv = dw11 & 0xffff;
-        if (iv >= n->conf_ioqpairs + 1) {
+        case NVME_GETFEAT_SELECT_SAVED:
+        /* no features are saveable by the controller; fallthrough */
+        case NVME_GETFEAT_SELECT_DEFAULT:
+            defval = true;
+            break;
+        case NVME_GETFEAT_SELECT_CAP:
+            req->cqe.result = cpu_to_le32(feat->cap);
+            return NVME_SUCCESS;
+        default:
             return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        result = iv;
-        if (iv == n->admin_cq.vector) {
-            result |= NVME_INTVC_NOCOALESCING;
-        }
-        break;
-    case NVME_FDP_MODE:
-        endgrpid = dw11 & 0xff;
-
-        if (endgrpid != 0x1) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        ret = nvme_get_feature_fdp(n, endgrpid, &result);
-        if (ret) {
-            return ret;
-        }
-        break;
-
-    case NVME_WRITE_ATOMICITY:
-        result = n->dn;
-        break;
-    default:
-        result = nvme_feature_default[fid];
-        break;
     }
 
-out:
-    req->cqe.result = cpu_to_le32(result);
-    return ret;
+    return feat->get(n, req, defval);
 }
 
 static uint16_t nvme_set_feature_timestamp(NvmeCtrl *n, NvmeRequest *req)
@@ -6450,8 +6431,7 @@ static uint16_t nvme_set_feature_timestamp(NvmeCtrl *n, NvmeRequest *req)
     return NVME_SUCCESS;
 }
 
-static uint16_t nvme_set_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
-                                            NvmeRequest *req)
+static uint16_t nvme_set_feature_fdp_events(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeCmd *cmd = &req->cmd;
     uint32_t cdw11 = le32_to_cpu(cmd->cdw11);
@@ -6463,8 +6443,10 @@ static uint16_t nvme_set_feature_fdp_events(NvmeCtrl *n, NvmeNamespace *ns,
     unsigned int i;
     g_autofree uint8_t *events = g_malloc0(noet);
     NvmeRuHandle *ruh = NULL;
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    NvmeNamespace *ns = nvme_ns(n, nsid);
 
-    assert(ns);
+    assert(ns); /* caller checked */
 
     if (!n->subsys || !n->subsys->endgrp.fdp.enabled) {
         return NVME_FDP_DISABLED | NVME_DNR;
@@ -6542,6 +6524,167 @@ static uint16_t nvme_set_feature_write_atomicity(NvmeCtrl *n, NvmeRequest *req)
     return NVME_SUCCESS;
 }
 
+static uint16_t nvme_set_feature_temp_threshold(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+    uint32_t result = 0;
+
+    /* the controller only implements the composite temperature sensor */
+    if (NVME_TEMP_TMPSEL(dw11) != NVME_TEMP_TMPSEL_COMPOSITE) {
+        goto out;
+    }
+
+    switch (NVME_TEMP_THSEL(dw11)) {
+    case NVME_TEMP_THSEL_OVER:
+        n->features.temp_thresh_hi = NVME_TEMP_TMPTH(dw11);
+        break;
+    case NVME_TEMP_THSEL_UNDER:
+        n->features.temp_thresh_low = NVME_TEMP_TMPTH(dw11);
+        break;
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    if ((n->temperature >= n->features.temp_thresh_hi) ||
+        (n->temperature <= n->features.temp_thresh_low)) {
+        nvme_smart_event(n, NVME_SMART_TEMPERATURE);
+    }
+
+out:
+    req->cqe.result = cpu_to_le32(result);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_set_feature_errrec(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+
+    NvmeNamespace *ns = NULL;
+
+    if (nsid == NVME_NSID_BROADCAST) {
+        for (int i = 1; i <= NVME_MAX_NAMESPACES; i++) {
+            ns = nvme_ns(n, i);
+
+            if (!ns) {
+                continue;
+            }
+
+            if (NVME_ID_NS_NSFEAT_DULBE(ns->id_ns.nsfeat)) {
+                ns->features.err_rec = dw11;
+            }
+        }
+    } else {
+        ns = nvme_ns(n, nsid);
+
+        assert(ns); /* caller checked */
+        if (NVME_ID_NS_NSFEAT_DULBE(ns->id_ns.nsfeat))  {
+            ns->features.err_rec = dw11;
+        }
+    }
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_set_feature_vwc(NvmeCtrl *n, NvmeRequest *req)
+{
+    NvmeNamespace *ns = NULL;
+
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+
+    for (int i = 1; i <= NVME_MAX_NAMESPACES; i++) {
+        ns = nvme_ns(n, i);
+        if (!ns) {
+            continue;
+        }
+
+        if (!(dw11 & 0x1) && blk_enable_write_cache(ns->blkconf.blk)) {
+            blk_flush(ns->blkconf.blk);
+        }
+
+        blk_set_enable_write_cache(ns->blkconf.blk, dw11 & 1);
+    }
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_set_feature_numqs(NvmeCtrl *n, NvmeRequest *req)
+{
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+
+    if (n->qs_created) {
+        return NVME_CMD_SEQ_ERROR | NVME_DNR;
+    }
+
+    /*
+     * NVMe v1.3, Section 5.21.1.7: FFFFh is not an allowed value for NCQR
+     * and NSQR.
+     */
+    if ((dw11 & 0xffff) == 0xffff || ((dw11 >> 16) & 0xffff) == 0xffff) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+
+    trace_pci_nvme_setfeat_numq((dw11 & 0xffff) + 1,
+                                ((dw11 >> 16) & 0xffff) + 1,
+                                n->conf_ioqpairs,
+                                n->conf_ioqpairs);
+    req->cqe.result = cpu_to_le32((n->conf_ioqpairs - 1) |
+                                  ((n->conf_ioqpairs - 1) << 16));
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_set_feature_aec(NvmeCtrl *n, NvmeRequest *req)
+{
+    n->features.async_config = le32_to_cpu(req->cmd.cdw11);
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_set_feature_hbs(NvmeCtrl *n, NvmeRequest *req)
+{
+    NvmeNamespace *ns = NULL;
+
+    uint16_t status = nvme_h2c(n, (uint8_t *)&n->features.hbs,
+                      sizeof(n->features.hbs), req);
+    if (status) {
+        return status;
+    }
+
+    for (int i = 1; i <= NVME_MAX_NAMESPACES; i++) {
+        ns = nvme_ns(n, i);
+
+        if (!ns) {
+            continue;
+        }
+
+        ns->id_ns.nlbaf = ns->nlbaf - 1;
+        if (!n->features.hbs.lbafee) {
+            ns->id_ns.nlbaf = MIN(ns->id_ns.nlbaf, 15);
+        }
+    }
+
+    return status;
+}
+
+static uint16_t nvme_set_feature_cmd_set_profile(NvmeCtrl *n,
+                                                 NvmeRequest *req)
+{
+    uint32_t dw11 = le32_to_cpu(req->cmd.cdw11);
+
+    if (dw11 & 0x1ff) {
+        trace_pci_nvme_err_invalid_iocsci(dw11 & 0x1ff);
+        return NVME_IOCS_COMBINATION_REJECTED | NVME_DNR;
+    }
+
+    return NVME_SUCCESS;
+}
+
+static uint16_t nvme_set_feature_fdp(NvmeCtrl *n, NvmeRequest *req)
+{
+    /* spec: abort with cmd seq err if there's one or more NS' in endgrp */
+    return NVME_CMD_SEQ_ERROR | NVME_DNR;
+}
+
 static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeNamespace *ns = NULL;
@@ -6552,20 +6695,21 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
     uint32_t nsid = le32_to_cpu(cmd->nsid);
     uint8_t fid = NVME_GETSETFEAT_FID(dw10);
     uint8_t save = NVME_SETFEAT_SAVE(dw10);
-    uint16_t status;
-    int i;
+    NvmeFeatureDef *feat = NULL;
 
     trace_pci_nvme_setfeat(nvme_cid(req), nsid, fid, save, dw11);
 
-    if (save && !(nvme_feature_cap[fid] & NVME_FEAT_CAP_SAVE)) {
+    feat = &n->features.defs[fid];
+
+    if (save && !(feat->cap & NVME_FEAT_CAP_SAVE)) {
         return NVME_FID_NOT_SAVEABLE | NVME_DNR;
     }
 
-    if (!nvme_feature_support[fid]) {
+    if (!nvme_feature_supported(n, fid)) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    if (nvme_feature_cap[fid] & NVME_FEAT_CAP_NS) {
+    if (feat->cap & NVME_FEAT_CAP_NS) {
         if (nsid != NVME_NSID_BROADCAST) {
             if (!nvme_nsid_valid(n, nsid)) {
                 return NVME_INVALID_NSID | NVME_DNR;
@@ -6584,134 +6728,12 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeRequest *req)
         return NVME_FEAT_NOT_NS_SPEC | NVME_DNR;
     }
 
-    if (!(nvme_feature_cap[fid] & NVME_FEAT_CAP_CHANGE)) {
+    if (!(feat->cap & NVME_FEAT_CAP_CHANGE)) {
         return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
     }
 
-    switch (fid) {
-    case NVME_TEMPERATURE_THRESHOLD:
-        if (NVME_TEMP_TMPSEL(dw11) != NVME_TEMP_TMPSEL_COMPOSITE) {
-            break;
-        }
-
-        switch (NVME_TEMP_THSEL(dw11)) {
-        case NVME_TEMP_THSEL_OVER:
-            n->features.temp_thresh_hi = NVME_TEMP_TMPTH(dw11);
-            break;
-        case NVME_TEMP_THSEL_UNDER:
-            n->features.temp_thresh_low = NVME_TEMP_TMPTH(dw11);
-            break;
-        default:
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        if ((n->temperature >= n->features.temp_thresh_hi) ||
-            (n->temperature <= n->features.temp_thresh_low)) {
-            nvme_smart_event(n, NVME_SMART_TEMPERATURE);
-        }
-
-        break;
-    case NVME_ERROR_RECOVERY:
-        if (nsid == NVME_NSID_BROADCAST) {
-            for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
-                ns = nvme_ns(n, i);
-
-                if (!ns) {
-                    continue;
-                }
-
-                if (NVME_ID_NS_NSFEAT_DULBE(ns->id_ns.nsfeat)) {
-                    ns->features.err_rec = dw11;
-                }
-            }
-
-            break;
-        }
-
-        assert(ns);
-        if (NVME_ID_NS_NSFEAT_DULBE(ns->id_ns.nsfeat))  {
-            ns->features.err_rec = dw11;
-        }
-        break;
-    case NVME_VOLATILE_WRITE_CACHE:
-        for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
-            ns = nvme_ns(n, i);
-            if (!ns) {
-                continue;
-            }
-
-            if (!(dw11 & 0x1) && blk_enable_write_cache(ns->blkconf.blk)) {
-                blk_flush(ns->blkconf.blk);
-            }
-
-            blk_set_enable_write_cache(ns->blkconf.blk, dw11 & 1);
-        }
-
-        break;
-
-    case NVME_NUMBER_OF_QUEUES:
-        if (n->qs_created) {
-            return NVME_CMD_SEQ_ERROR | NVME_DNR;
-        }
-
-        /*
-         * NVMe v1.3, Section 5.21.1.7: FFFFh is not an allowed value for NCQR
-         * and NSQR.
-         */
-        if ((dw11 & 0xffff) == 0xffff || ((dw11 >> 16) & 0xffff) == 0xffff) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        trace_pci_nvme_setfeat_numq((dw11 & 0xffff) + 1,
-                                    ((dw11 >> 16) & 0xffff) + 1,
-                                    n->conf_ioqpairs,
-                                    n->conf_ioqpairs);
-        req->cqe.result = cpu_to_le32((n->conf_ioqpairs - 1) |
-                                      ((n->conf_ioqpairs - 1) << 16));
-        break;
-    case NVME_ASYNCHRONOUS_EVENT_CONF:
-        n->features.async_config = dw11;
-        break;
-    case NVME_TIMESTAMP:
-        return nvme_set_feature_timestamp(n, req);
-    case NVME_HOST_BEHAVIOR_SUPPORT:
-        status = nvme_h2c(n, (uint8_t *)&n->features.hbs,
-                          sizeof(n->features.hbs), req);
-        if (status) {
-            return status;
-        }
-
-        for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
-            ns = nvme_ns(n, i);
-
-            if (!ns) {
-                continue;
-            }
-
-            ns->id_ns.nlbaf = ns->nlbaf - 1;
-            if (!n->features.hbs.lbafee) {
-                ns->id_ns.nlbaf = MIN(ns->id_ns.nlbaf, 15);
-            }
-        }
-
-        return status;
-    case NVME_COMMAND_SET_PROFILE:
-        if (dw11 & 0x1ff) {
-            trace_pci_nvme_err_invalid_iocsci(dw11 & 0x1ff);
-            return NVME_IOCS_COMBINATION_REJECTED | NVME_DNR;
-        }
-        break;
-    case NVME_FDP_MODE:
-        /* spec: abort with cmd seq err if there's one or more NS' in endgrp */
-        return NVME_CMD_SEQ_ERROR | NVME_DNR;
-    case NVME_FDP_EVENTS:
-        return nvme_set_feature_fdp_events(n, ns, req);
-    case NVME_WRITE_ATOMICITY:
-        return nvme_set_feature_write_atomicity(n, req);
-    default:
-        return NVME_FEAT_NOT_CHANGEABLE | NVME_DNR;
-    }
-    return NVME_SUCCESS;
+    assert(feat->set);
+    return feat->set(n, req);
 }
 
 static uint16_t nvme_aer(NvmeCtrl *n, NvmeRequest *req)
@@ -9175,6 +9197,86 @@ static void nvme_init_ctrl_oncs_iocss(NvmeCtrl *n, uint16_t *oncs)
     }
 }
 
+static void nvme_init_ctrl_features_default(NvmeCtrl *n)
+{
+    /* TODO: split out into smaller helpers, one for setting mandatory-only features */
+    NvmeFeatureDef *f = n->features.defs;
+
+    NvmeFeatureDef noop = (NvmeFeatureDef){
+        .get = nvme_get_feature_noop,
+        .set = NULL,
+        .cap = 0,
+    };
+
+    f[NVME_ARBITRATION] = (NvmeFeatureDef) {
+        .get = nvme_get_feature_arbitration,
+        .set = NULL,
+        .cap = 0,
+    };
+    f[NVME_POWER_MANAGEMENT] = noop;
+    f[NVME_TEMPERATURE_THRESHOLD] = (NvmeFeatureDef){
+        .get = nvme_get_feature_temp_threshold,
+        .set = nvme_set_feature_temp_threshold,
+        .cap = NVME_FEAT_CAP_CHANGE,
+    };
+    f[NVME_ERROR_RECOVERY] = (NvmeFeatureDef){
+        .get = nvme_get_feature_errrec,
+        .set = nvme_set_feature_errrec,
+        .cap = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
+    };
+    f[NVME_VOLATILE_WRITE_CACHE] = (NvmeFeatureDef){
+        .get = nvme_get_feature_vwc,
+        .set = nvme_set_feature_vwc,
+        .cap = NVME_FEAT_CAP_CHANGE,
+    };
+    f[NVME_NUMBER_OF_QUEUES] = (NvmeFeatureDef){
+        .get = nvme_get_feature_numqs,
+        .set = nvme_set_feature_numqs,
+        .cap = NVME_FEAT_CAP_CHANGE,
+    };
+    f[NVME_INTERRUPT_COALESCING] = noop;
+    f[NVME_INTERRUPT_VECTOR_CONF] = (NvmeFeatureDef){
+        .get = nvme_get_feature_int_vec_conf,
+        .set = NULL,
+        .cap = 0,
+    };
+    f[NVME_WRITE_ATOMICITY] = (NvmeFeatureDef){
+        .get = nvme_get_feature_write_atomicity,
+        .set = nvme_set_feature_write_atomicity,
+        .cap = 0
+    };
+    f[NVME_ASYNCHRONOUS_EVENT_CONF] = (NvmeFeatureDef){
+        .get = nvme_get_feature_aec,
+        .set = nvme_set_feature_aec,
+        .cap = NVME_FEAT_CAP_CHANGE,
+    };
+    f[NVME_TIMESTAMP] = (NvmeFeatureDef){
+        .get = nvme_get_feature_timestamp,
+        .set = nvme_set_feature_timestamp,
+        .cap = NVME_FEAT_CAP_CHANGE,
+    };
+    f[NVME_HOST_BEHAVIOR_SUPPORT] = (NvmeFeatureDef){
+        .get = nvme_get_feature_hbs,
+        .set = nvme_set_feature_hbs,
+        .cap = NVME_FEAT_CAP_CHANGE,
+    };
+    f[NVME_COMMAND_SET_PROFILE] = (NvmeFeatureDef){
+        .get = nvme_get_feature_noop,
+        .set = nvme_set_feature_cmd_set_profile,
+        .cap = NVME_FEAT_CAP_CHANGE,
+    };
+    f[NVME_FDP_MODE] = (NvmeFeatureDef){
+        .get = nvme_get_feature_fdp,
+        .set = nvme_set_feature_fdp,
+        .cap = NVME_FEAT_CAP_CHANGE,
+    };
+    f[NVME_FDP_EVENTS] = (NvmeFeatureDef){
+        .get = nvme_get_feature_fdp_events,
+        .set = nvme_set_feature_fdp_events,
+        .cap = NVME_FEAT_CAP_CHANGE | NVME_FEAT_CAP_NS,
+    };
+}
+
 static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 {
     NvmeIdCtrl *id = &n->id_ctrl;
@@ -9186,6 +9288,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 
     n->ops.init_acs(n);
     n->ops.init_iocs(n);
+    n->ops.init_features(n);
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
@@ -9609,6 +9712,7 @@ static void nvme_init_ops_default(NvmeCtrl *n, NvmeCtrlOps *ops)
 {
     ops->init_acs = nvme_init_ctrl_acs_default;
     ops->init_iocs = nvme_init_ctrl_iocs_default;
+    ops->init_features = nvme_init_ctrl_features_default;
 }
 
 static void nvme_class_init(ObjectClass *oc, const void *data)
