@@ -818,8 +818,16 @@ static inline uint16_t nvme_h2c(NvmeCtrl *n, void *ptr, uint32_t len,
     return nvme_tx(n, &req->sg, ptr, len, NVME_TX_DIRECTION_TO_DEVICE);
 }
 
+uint16_t nvme_check_mdts(NvmeCtrl *n, size_t len);
+
+static inline size_t nvme_pi_tuple_size(NvmeNamespace *ns)
+{
+    return ns->pif ? 16 : 8;
+}
+
 void nvme_smart_event(NvmeCtrl *n, uint8_t event);
 void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns);
+void nvme_detach_ns(NvmeCtrl *n, NvmeNamespace *ns);
 uint16_t nvme_bounce_data(NvmeCtrl *n, void *ptr, uint32_t len,
                           NvmeTxDirection dir, NvmeRequest *req);
 uint16_t nvme_bounce_mdata(NvmeCtrl *n, void *ptr, uint32_t len,
@@ -833,5 +841,36 @@ void nvme_ns_atomic_configure_boundary(bool dn, uint16_t nabsn,
 
 void nvme_set_timestamp(NvmeCtrl *n, uint64_t ts);
 uint64_t nvme_get_timestamp(const NvmeCtrl *n);
+
+uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req);
+int nvme_check_sqid(NvmeCtrl *n, uint16_t sqid);
+int nvme_check_cqid(NvmeCtrl *n, uint16_t cqid);
+
+void nvme_irq_deassert(NvmeCtrl *n, NvmeCQueue *cq);
+void nvme_post_cqes(void *opaque);
+void nvme_enqueue_req_completion(NvmeCQueue *cq, NvmeRequest *req);
+void nvme_enqueue_event(NvmeCtrl *n, uint8_t event_type,
+                        uint8_t event_info, uint8_t log_page);
+void nvme_misc_cb(void *opaque, int ret);
+int nvme_init_cq_ioeventfd(NvmeCQueue *cq);
+int nvme_init_sq_ioeventfd(NvmeSQueue *sq);
+void nvme_free_sq(NvmeSQueue *sq, NvmeCtrl *n);
+void nvme_init_sq(NvmeSQueue *sq, NvmeCtrl *n, uint64_t dma_addr,
+                  uint16_t sqid, uint16_t cqid, uint16_t size);
+void nvme_free_cq(NvmeCQueue *cq, NvmeCtrl *n);
+void nvme_init_cq(NvmeCQueue *cq, NvmeCtrl *n, uint64_t dma_addr,
+                  uint16_t cqid, uint16_t vector, uint16_t size,
+                  uint16_t irq_enabled);
+void nvme_update_dsm_limits(NvmeCtrl *n, NvmeNamespace *ns);
+bool nvme_csi_supported(NvmeCtrl *n, uint8_t csi);
+uint16_t nvme_assign_virt_res_to_prim(NvmeCtrl *n, NvmeRequest *req,
+                                      uint16_t cntlid, uint8_t rt,
+                                      int nr);
+uint16_t nvme_assign_virt_res_to_sec(NvmeCtrl *n, NvmeRequest *req,
+                                     uint16_t cntlid, uint8_t rt, int nr);
+uint16_t nvme_virt_set_state(NvmeCtrl *n, uint16_t cntlid, bool online);
+
+uint16_t nvme_identify(NvmeCtrl *n, NvmeRequest *req);
+void nvme_process_aers(void *opaque);
 
 #endif /* HW_NVME_NVME_H */
