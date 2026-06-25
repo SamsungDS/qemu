@@ -24,6 +24,9 @@
 
 #include "block/nvme.h"
 
+#define NVME_TEMPERATURE 0x143
+#define NVME_TEMPERATURE_WARNING 0x157
+#define NVME_TEMPERATURE_CRITICAL 0x175
 #define NVME_MAX_CONTROLLERS 256
 #define NVME_MAX_NAMESPACES  256
 #define NVME_EUI64_DEFAULT ((uint64_t)0x5254000000000000)
@@ -295,6 +298,12 @@ typedef struct NvmeNamespace {
 
     NvmeAtomic  atomic;
 } NvmeNamespace;
+
+static inline bool nvme_nsid_valid(NvmeCtrl *n, uint32_t nsid)
+{
+    return nsid &&
+        (nsid == NVME_NSID_BROADCAST || nsid <= NVME_MAX_NAMESPACES);
+}
 
 static inline uint32_t nvme_nsid(NvmeNamespace *ns)
 {
@@ -714,6 +723,11 @@ typedef enum NvmeResetType {
     NVME_RESET_CONTROLLER = 1,
 } NvmeResetType;
 
+static inline bool nvme_ph_valid(NvmeNamespace *ns, uint16_t ph)
+{
+    return ph < ns->fdp.nphs;
+}
+
 static inline NvmeNamespace *nvme_ns(NvmeCtrl *n, uint32_t nsid)
 {
     if (!nsid || nsid > NVME_MAX_NAMESPACES) {
@@ -773,18 +787,51 @@ static inline NvmeSecCtrlEntry *nvme_sctrl_for_cntlid(NvmeCtrl *n,
     return NULL;
 }
 
+uint16_t nvme_tx(NvmeCtrl *n, NvmeSg *sg, void *ptr, uint32_t len,
+                 NvmeTxDirection dir);
+uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len,
+                       NvmeCmd *cmd);
+
+static inline uint16_t nvme_c2h(NvmeCtrl *n, void *ptr, uint32_t len,
+                                NvmeRequest *req)
+{
+    uint16_t status;
+
+    status = nvme_map_dptr(n, &req->sg, len, &req->cmd);
+    if (status) {
+        return status;
+    }
+
+    return nvme_tx(n, &req->sg, ptr, len, NVME_TX_DIRECTION_FROM_DEVICE);
+}
+
+static inline uint16_t nvme_h2c(NvmeCtrl *n, void *ptr, uint32_t len,
+                                NvmeRequest *req)
+{
+    uint16_t status;
+
+    status = nvme_map_dptr(n, &req->sg, len, &req->cmd);
+    if (status) {
+        return status;
+    }
+
+    return nvme_tx(n, &req->sg, ptr, len, NVME_TX_DIRECTION_TO_DEVICE);
+}
+
+void nvme_smart_event(NvmeCtrl *n, uint8_t event);
 void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns);
 uint16_t nvme_bounce_data(NvmeCtrl *n, void *ptr, uint32_t len,
                           NvmeTxDirection dir, NvmeRequest *req);
 uint16_t nvme_bounce_mdata(NvmeCtrl *n, void *ptr, uint32_t len,
                            NvmeTxDirection dir, NvmeRequest *req);
 void nvme_rw_complete_cb(void *opaque, int ret);
-uint16_t nvme_map_dptr(NvmeCtrl *n, NvmeSg *sg, size_t len,
-                       NvmeCmd *cmd);
 
 void nvme_atomic_configure_max_write_size(bool dn, uint16_t awun,
                                           uint16_t awupf, NvmeAtomic *atomic);
 void nvme_ns_atomic_configure_boundary(bool dn, uint16_t nabsn,
                                        uint16_t nabspf, NvmeAtomic *atomic);
+
+void nvme_set_timestamp(NvmeCtrl *n, uint64_t ts);
+uint64_t nvme_get_timestamp(const NvmeCtrl *n);
 
 #endif /* HW_NVME_NVME_H */
