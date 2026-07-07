@@ -870,7 +870,6 @@ uint16_t nvme_assign_virt_res_to_sec(NvmeCtrl *n, NvmeRequest *req,
                                      uint16_t cntlid, uint8_t rt, int nr);
 uint16_t nvme_virt_set_state(NvmeCtrl *n, uint16_t cntlid, bool online);
 
-uint16_t nvme_identify(NvmeCtrl *n, NvmeRequest *req);
 void nvme_process_aers(void *opaque);
 
 #endif /* HW_NVME_NVME_H */
