@@ -594,7 +594,17 @@ typedef struct NvmeCtrlOps {
     void (*init_acs)(NvmeCtrl *n);
     void (*init_iocs)(NvmeCtrl *n);
     void (*init_features)(NvmeCtrl *n);
+    void (*init_identify)(NvmeCtrl *n);
 } NvmeCtrlOps;
+
+typedef struct NvmeIdDef {
+    uint16_t (*handle)(NvmeCtrl *n, NvmeRequest *req, bool active);
+    bool active;
+} NvmeIdDef;
+
+typedef struct NvmeIdSet {
+    NvmeIdDef cmds[256];
+} NvmeIdSet;
 
 typedef struct NvmeFeatureDef {
     uint16_t (*get)(NvmeCtrl *n, NvmeRequest *req, bool defval);
@@ -658,6 +668,8 @@ typedef struct NvmeCtrl {
          * index in the table corresponding to its csi */
         NvmeCmdSet *iocss[256];
     } cs;
+
+    NvmeIdSet id_ops;
 
     struct {
         MemoryRegion mem;

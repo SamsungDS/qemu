@@ -10,14 +10,14 @@ uint16_t nvme_rpt_empty_id_struct(NvmeCtrl *n, NvmeRequest *req)
     return nvme_c2h(n, id, sizeof(id), req);
 }
 
-uint16_t nvme_identify_ctrl(NvmeCtrl *n, NvmeRequest *req)
+uint16_t nvme_identify_ctrl(NvmeCtrl *n, NvmeRequest *req, bool _)
 {
     trace_pci_nvme_identify_ctrl();
 
     return nvme_c2h(n, (uint8_t *)&n->id_ctrl, sizeof(n->id_ctrl), req);
 }
 
-uint16_t nvme_identify_ctrl_csi(NvmeCtrl *n, NvmeRequest *req)
+uint16_t nvme_identify_ctrl_csi(NvmeCtrl *n, NvmeRequest *req, bool _)
 {
     NvmeIdentify *c = (NvmeIdentify *)&req->cmd;
     uint8_t id[NVME_IDENTIFY_DATA_SIZE] = {};
@@ -122,7 +122,7 @@ uint16_t nvme_identify_ctrl_list(NvmeCtrl *n, NvmeRequest *req,
     return nvme_c2h(n, (uint8_t *)list, sizeof(list), req);
 }
 
-uint16_t nvme_identify_pri_ctrl_cap(NvmeCtrl *n, NvmeRequest *req)
+uint16_t nvme_identify_pri_ctrl_cap(NvmeCtrl *n, NvmeRequest *req, bool _)
 {
     trace_pci_nvme_identify_pri_ctrl_cap(le16_to_cpu(n->pri_ctrl_cap.cntlid));
 
@@ -130,7 +130,7 @@ uint16_t nvme_identify_pri_ctrl_cap(NvmeCtrl *n, NvmeRequest *req)
                     sizeof(NvmePriCtrlCap), req);
 }
 
-uint16_t nvme_identify_sec_ctrl_list(NvmeCtrl *n, NvmeRequest *req)
+uint16_t nvme_identify_sec_ctrl_list(NvmeCtrl *n, NvmeRequest *req, bool _)
 {
     NvmeIdentify *c = (NvmeIdentify *)&req->cmd;
     uint16_t pri_ctrl_id = le16_to_cpu(n->pri_ctrl_cap.cntlid);
@@ -311,7 +311,7 @@ uint16_t nvme_identify_nslist_csi(NvmeCtrl *n, NvmeRequest *req,
     return nvme_c2h(n, list, data_len, req);
 }
 
-uint16_t nvme_endurance_group_list(NvmeCtrl *n, NvmeRequest *req)
+uint16_t nvme_endurance_group_list(NvmeCtrl *n, NvmeRequest *req, bool _)
 {
     uint16_t list[NVME_CONTROLLER_LIST_SIZE] = {};
     uint16_t *nr_ids = &list[0];
@@ -331,7 +331,7 @@ uint16_t nvme_endurance_group_list(NvmeCtrl *n, NvmeRequest *req)
     return nvme_c2h(n, list, sizeof(list), req);
 }
 
-uint16_t nvme_identify_ns_descr_list(NvmeCtrl *n, NvmeRequest *req)
+uint16_t nvme_identify_ns_descr_list(NvmeCtrl *n, NvmeRequest *req, bool _)
 {
     NvmeNamespace *ns;
     NvmeIdentify *c = (NvmeIdentify *)&req->cmd;
@@ -399,7 +399,7 @@ uint16_t nvme_identify_ns_descr_list(NvmeCtrl *n, NvmeRequest *req)
     return nvme_c2h(n, list, sizeof(list), req);
 }
 
-uint16_t nvme_identify_cmd_set(NvmeCtrl *n, NvmeRequest *req)
+uint16_t nvme_identify_cmd_set(NvmeCtrl *n, NvmeRequest *req, bool _)
 {
     uint8_t list[NVME_IDENTIFY_DATA_SIZE] = {};
     static const int data_len = sizeof(list);
@@ -416,51 +416,94 @@ uint16_t nvme_identify_cmd_set(NvmeCtrl *n, NvmeRequest *req)
 uint16_t nvme_identify(NvmeCtrl *n, NvmeRequest *req)
 {
     NvmeIdentify *c = (NvmeIdentify *)&req->cmd;
+    NvmeIdDef *id_op = &n->id_ops.cmds[c->cns];
 
     trace_pci_nvme_identify(nvme_cid(req), c->cns, le16_to_cpu(c->ctrlid),
                             c->csi);
 
-    switch (c->cns) {
-    case NVME_ID_CNS_NS:
-        return nvme_identify_ns(n, req, true);
-    case NVME_ID_CNS_NS_PRESENT:
-        return nvme_identify_ns(n, req, false);
-    case NVME_ID_CNS_NS_ATTACHED_CTRL_LIST:
-        return nvme_identify_ctrl_list(n, req, true);
-    case NVME_ID_CNS_CTRL_LIST:
-        return nvme_identify_ctrl_list(n, req, false);
-    case NVME_ID_CNS_PRIMARY_CTRL_CAP:
-        return nvme_identify_pri_ctrl_cap(n, req);
-    case NVME_ID_CNS_SECONDARY_CTRL_LIST:
-        return nvme_identify_sec_ctrl_list(n, req);
-    case NVME_ID_CNS_CS_NS:
-        return nvme_identify_ns_csi(n, req, true);
-    case NVME_ID_CNS_CS_IND_NS:
-        return nvme_identify_ns_ind(n, req, false);
-    case NVME_ID_CNS_CS_IND_NS_ALLOCATED:
-        return nvme_identify_ns_ind(n, req, true);
-    case NVME_ID_CNS_CS_NS_PRESENT:
-        return nvme_identify_ns_csi(n, req, false);
-    case NVME_ID_CNS_CTRL:
-        return nvme_identify_ctrl(n, req);
-    case NVME_ID_CNS_CS_CTRL:
-        return nvme_identify_ctrl_csi(n, req);
-    case NVME_ID_CNS_NS_ACTIVE_LIST:
-        return nvme_identify_nslist(n, req, true);
-    case NVME_ID_CNS_NS_PRESENT_LIST:
-        return nvme_identify_nslist(n, req, false);
-    case NVME_ID_CNS_CS_NS_ACTIVE_LIST:
-        return nvme_identify_nslist_csi(n, req, true);
-    case NVME_ID_CNS_ENDURANCE_GROUP_LIST:
-        return nvme_endurance_group_list(n, req);
-    case NVME_ID_CNS_CS_NS_PRESENT_LIST:
-        return nvme_identify_nslist_csi(n, req, false);
-    case NVME_ID_CNS_NS_DESCR_LIST:
-        return nvme_identify_ns_descr_list(n, req);
-    case NVME_ID_CNS_IO_COMMAND_SET:
-        return nvme_identify_cmd_set(n, req);
-    default:
+    if (!id_op->handle) {
         trace_pci_nvme_err_invalid_identify_cns(le32_to_cpu(c->cns));
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+
+    return id_op->handle(n, req, id_op->active);
+}
+
+void nvme_identify_23_m(NvmeIdSet *tbl)
+{
+    tbl->cmds[NVME_ID_CNS_NS] = (NvmeIdDef){
+        .handle = nvme_identify_ns,
+        .active = true,
+    };
+    tbl->cmds[NVME_ID_CNS_CTRL] = (NvmeIdDef){
+        .handle = nvme_identify_ctrl,
+    };
+    tbl->cmds[NVME_ID_CNS_NS_ACTIVE_LIST] = (NvmeIdDef){
+        .handle = nvme_identify_nslist,
+        .active = true,
+    };
+    tbl->cmds[NVME_ID_CNS_NS_DESCR_LIST] = (NvmeIdDef){
+        .handle = nvme_identify_ns_descr_list,
+    };
+    tbl->cmds[NVME_ID_CNS_CS_NS] = (NvmeIdDef){
+        .handle = nvme_identify_ns_csi,
+        .active = true,
+    };
+    tbl->cmds[NVME_ID_CNS_CS_CTRL] = (NvmeIdDef){
+        .handle = nvme_identify_ctrl_csi,
+    };
+    tbl->cmds[NVME_ID_CNS_CS_NS_ACTIVE_LIST] = (NvmeIdDef){
+        .handle = nvme_identify_nslist_csi,
+        .active = true,
+    };
+    tbl->cmds[NVME_ID_CNS_CS_IND_NS] = (NvmeIdDef){
+        .handle = nvme_identify_ns_ind,
+        .active = false,
+    };
+}
+
+void nvme_identify_defaults(NvmeIdSet *tbl)
+{
+    nvme_identify_23_m(tbl);
+
+    tbl->cmds[NVME_ID_CNS_NS_PRESENT_LIST] = (NvmeIdDef){
+        .handle = nvme_identify_nslist,
+        .active = false,
+    };
+    tbl->cmds[NVME_ID_CNS_NS_PRESENT] = (NvmeIdDef){
+        .handle = nvme_identify_ns,
+        .active = false,
+    };
+    tbl->cmds[NVME_ID_CNS_NS_ATTACHED_CTRL_LIST] = (NvmeIdDef){
+        .handle = nvme_identify_ctrl_list,
+        .active = true,
+    };
+    tbl->cmds[NVME_ID_CNS_CTRL_LIST] = (NvmeIdDef){
+        .handle = nvme_identify_ctrl_list,
+        .active = false,
+    };
+    tbl->cmds[NVME_ID_CNS_PRIMARY_CTRL_CAP] = (NvmeIdDef){
+        .handle = nvme_identify_pri_ctrl_cap,
+    };
+    tbl->cmds[NVME_ID_CNS_SECONDARY_CTRL_LIST] = (NvmeIdDef){
+        .handle = nvme_identify_sec_ctrl_list,
+    };
+    tbl->cmds[NVME_ID_CNS_ENDURANCE_GROUP_LIST] = (NvmeIdDef){
+        .handle = nvme_endurance_group_list,
+    };
+    tbl->cmds[NVME_ID_CNS_CS_NS_PRESENT_LIST] = (NvmeIdDef){
+        .handle = nvme_identify_nslist_csi,
+        .active = false,
+    };
+    tbl->cmds[NVME_ID_CNS_CS_NS_PRESENT] = (NvmeIdDef){
+        .handle = nvme_identify_ns_csi,
+        .active = false,
+    };
+    tbl->cmds[NVME_ID_CNS_IO_COMMAND_SET] = (NvmeIdDef){
+        .handle = nvme_identify_cmd_set,
+    };
+    tbl->cmds[NVME_ID_CNS_CS_IND_NS_ALLOCATED] = (NvmeIdDef){
+        .handle = nvme_identify_ns_ind,
+        .active = true,
+    };
 }

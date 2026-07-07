@@ -215,6 +215,7 @@
 #include "dif.h"
 #include "features.h"
 #include "cs_adm.h"
+#include "identify.h"
 #include "trace.h"
 
 #define NVME_MAX_IOQPAIRS 0xffff
@@ -7233,6 +7234,12 @@ static void nvme_init_ctrl_features_default(NvmeCtrl *n)
     };
 }
 
+static void nvme_init_ctrl_identify_default(NvmeCtrl *n)
+{
+    memset(&n->id_ops, 0, sizeof(n->id_ops));
+    nvme_identify_defaults(&n->id_ops);
+}
+
 static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
 {
     NvmeIdCtrl *id = &n->id_ctrl;
@@ -7245,6 +7252,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     n->ops.init_acs(n);
     n->ops.init_iocs(n);
     n->ops.init_features(n);
+    n->ops.init_identify(n);
 
     id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
     id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
@@ -7669,6 +7677,7 @@ static void nvme_init_ops_default(NvmeCtrl *n, NvmeCtrlOps *ops)
     ops->init_acs = nvme_init_ctrl_acs_default;
     ops->init_iocs = nvme_init_ctrl_iocs_default;
     ops->init_features = nvme_init_ctrl_features_default;
+    ops->init_identify = nvme_init_ctrl_identify_default;
 }
 
 static void nvme_class_init(ObjectClass *oc, const void *data)
