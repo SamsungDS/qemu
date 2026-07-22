@@ -21,6 +21,7 @@
 #include "qemu/uuid.h"
 #include "hw/pci/pci_device.h"
 #include "hw/block/block.h"
+#include "qemu/cutils.h"
 
 #include "block/nvme.h"
 
@@ -854,6 +855,23 @@ uint16_t nvme_check_mdts(NvmeCtrl *n, size_t len);
 static inline size_t nvme_pi_tuple_size(NvmeNamespace *ns)
 {
     return ns->pif ? 16 : 8;
+}
+
+static inline void nvme_init_id_ctrl_mn(NvmeIdCtrl *id, char *val)
+{
+    strpadcpy((char *)id->mn, sizeof(id->mn),
+              val ? val : "QEMU NVMe Ctrl", ' ');
+}
+
+static inline void nvme_init_id_ctrl_fr(NvmeIdCtrl *id, char *val)
+{
+    strpadcpy((char *)id->fr, sizeof(id->fr),
+              val ? val : QEMU_VERSION, ' ');
+}
+
+static inline void nvme_init_id_ctrl_serial(NvmeIdCtrl *id, char *val)
+{
+    strpadcpy((char *)id->sn, sizeof(id->sn), val, ' ');
 }
 
 void nvme_smart_event(NvmeCtrl *n, uint8_t event);

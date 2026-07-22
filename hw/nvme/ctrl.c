@@ -6653,68 +6653,37 @@ static void nvme_init_ctrl_identify_default(NvmeCtrl *n)
     nvme_identify_defaults(&n->id_ops);
 }
 
-static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
+static uint16_t nvme_init_ctrl_oacs(NvmeCmdSet *acs)
 {
-    NvmeIdCtrl *id = &n->id_ctrl;
-    uint8_t *pci_conf = pci_dev->config;
-    uint64_t cap = ldq_le_p(&n->bar.cap);
-    NvmeSecCtrlEntry *sctrl = nvme_sctrl(n);
-    uint32_t ctratt = le32_to_cpu(id->ctratt);
-    uint16_t oacs, oncs = 0;
 
-    n->ops.init_acs(n);
-    n->ops.init_iocs(n);
-    n->ops.init_features(n);
-    n->ops.init_identify(n);
-    n->ops.init_log(&n->log_ops);
+    uint16_t oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DIRECTIVES |
+                    NVME_OACS_SECURITY;
 
-    id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
-    id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
-    strpadcpy((char *)id->mn, sizeof(id->mn),
-              n->params.model ? n->params.model : "QEMU NVMe Ctrl", ' ');
-    strpadcpy((char *)id->fr, sizeof(id->fr),
-              n->params.firmware_version ? n->params.firmware_version : QEMU_VERSION, ' ');
-    strpadcpy((char *)id->sn, sizeof(id->sn), n->params.serial, ' ');
-
-    id->cntlid = cpu_to_le16(n->cntlid);
-
-    id->oaes = cpu_to_le32(NVME_OAES_NS_ATTR);
-
-    ctratt |= NVME_CTRATT_ELBAS;
-    if (n->params.ctratt.mem) {
-        ctratt |= NVME_CTRATT_MEM;
-    }
-    id->ctratt = cpu_to_le32(ctratt);
-
-    id->rab = 6;
-
-    if (n->params.use_intel_id) {
-        id->ieee[0] = 0xb3;
-        id->ieee[1] = 0x02;
-        id->ieee[2] = 0x00;
-    } else {
-        id->ieee[0] = 0x00;
-        id->ieee[1] = 0x54;
-        id->ieee[2] = 0x52;
-    }
-
-    id->mdts = n->params.mdts;
-    id->ver = cpu_to_le32(NVME_SPEC_VER);
-
-    oacs = NVME_OACS_NMS | NVME_OACS_FORMAT | NVME_OACS_DIRECTIVES |
-           NVME_OACS_SECURITY;
-
-    if (nvme_cssup(&n->cs.acs, NVME_ADM_CMD_DBBUF_CONFIG)) {
+    if (nvme_cssup(acs, NVME_ADM_CMD_DBBUF_CONFIG)) {
         oacs |= NVME_OACS_DBCS;
     }
 
-    if (nvme_cssup(&n->cs.acs, NVME_ADM_CMD_VIRT_MNGMT)) {
+    if (nvme_cssup(acs, NVME_ADM_CMD_VIRT_MNGMT)) {
         oacs |= NVME_OACS_VMS;
     }
 
-    id->oacs = cpu_to_le16(oacs);
+    return oacs;
+}
 
+static void nvme_init_id_ctrl_defaults(NvmeIdCtrl *id, uint8_t *pci_conf)
+{
+    id->vid = cpu_to_le16(pci_get_word(pci_conf + PCI_VENDOR_ID));
+    id->ssvid = cpu_to_le16(pci_get_word(pci_conf + PCI_SUBSYSTEM_VENDOR_ID));
+
+    id->oaes = cpu_to_le32(NVME_OAES_NS_ATTR);
+    id->rab = 6;
+    id->ver = cpu_to_le32(NVME_SPEC_VER);
     id->cntrltype = 0x1;
+
+    /* identify as Red Hat NVMe device by default*/
+    id->ieee[0] = 0x00;
+    id->ieee[1] = 0x54;
+    id->ieee[2] = 0x52;
 
     /*
      * Because the controller always completes the Abort command immediately,
@@ -6728,7 +6697,6 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
      * inconsequential.
      */
     id->acl = 3;
-    id->aerl = n->params.aerl;
     id->frmw = (NVME_NUM_FW_SLOTS << 1) | NVME_FRMW_SLOT1_RO;
     id->lpa = NVME_LPA_NS_SMART | NVME_LPA_CSE | NVME_LPA_EXTENDED;
 
@@ -6739,10 +6707,6 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->sqes = (NVME_SQES << 4) | NVME_SQES;
     id->cqes = (NVME_CQES << 4) | NVME_CQES;
     id->nn = cpu_to_le32(NVME_MAX_NAMESPACES);
-
-    oncs = NVME_ONCS_TIMESTAMP | NVME_ONCS_FEATURES;
-    nvme_init_ctrl_oncs_iocss(n, &oncs);
-    id->oncs = cpu_to_le16(oncs);
 
     /*
      * NOTE: If this device ever supports a command set that does NOT use 0x0
@@ -6758,25 +6722,80 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     id->sgls = cpu_to_le32(NVME_CTRL_SGLS_SUPPORT_NO_ALIGN |
                            NVME_CTRL_SGLS_MPTR_SGL);
 
-    nvme_init_subnqn(n);
-
     id->psd[0].mp = cpu_to_le16(0x9c4);
     id->psd[0].enlat = cpu_to_le32(0x10);
     id->psd[0].exlat = cpu_to_le32(0x4);
+}
 
-    NVME_CAP_SET_MQES(cap, n->params.mqes);
+static void nvme_init_bar_defaults(NvmeBar *bar)
+{
+    uint64_t cap = ldq_le_p(&bar->cap);
+    NVME_CAP_SET_MQES(cap, 0x7ff);
     NVME_CAP_SET_CQR(cap, 1);
     NVME_CAP_SET_TO(cap, 0xf);
     NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_NCSS);
     NVME_CAP_SET_CSS(cap, NVME_CAP_CSS_IOCSS);
+    NVME_CAP_SET_CMBS(cap, 0);
+    NVME_CAP_SET_PMRS(cap, 0);
     NVME_CAP_SET_MPSMAX(cap, 4);
-    NVME_CAP_SET_CMBS(cap, n->params.cmb_size_mb ? 1 : 0);
-    NVME_CAP_SET_PMRS(cap, n->pmr.dev ? 1 : 0);
-    stq_le_p(&n->bar.cap, cap);
+    stq_le_p(&bar->cap, cap);
 
-    stl_le_p(&n->bar.vs, NVME_SPEC_VER);
-    n->bar.intmc = n->bar.intms = 0;
+    stl_le_p(&bar->vs, NVME_SPEC_VER);
+    bar->intmc = bar->intms = 0;
+}
 
+static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
+{
+    NvmeIdCtrl *id = &n->id_ctrl;
+    uint8_t *pci_conf = pci_dev->config;
+    NvmeSecCtrlEntry *sctrl = nvme_sctrl(n);
+    uint32_t ctratt = le32_to_cpu(id->ctratt);
+    uint16_t oncs = 0;
+
+    n->ops.init_acs(n);
+    n->ops.init_iocs(n);
+    n->ops.init_features(n);
+    n->ops.init_identify(n);
+    n->ops.init_log(&n->log_ops);
+
+    nvme_init_id_ctrl_defaults(id, pci_conf);
+
+    nvme_init_id_ctrl_mn(id, n->params.model);
+    nvme_init_id_ctrl_fr(id, n->params.firmware_version);
+    nvme_init_id_ctrl_serial(id, n->params.serial);
+
+    id->aerl = n->params.aerl;
+    id->cntlid = cpu_to_le16(n->cntlid);
+
+    ctratt |= NVME_CTRATT_ELBAS;
+    if (n->params.ctratt.mem) {
+        ctratt |= NVME_CTRATT_MEM;
+    }
+    id->ctratt = cpu_to_le32(ctratt);
+
+    if (n->params.use_intel_id) {
+        id->ieee[0] = 0xb3;
+        id->ieee[1] = 0x02;
+        id->ieee[2] = 0x00;
+    }
+
+    id->mdts = n->params.mdts;
+    id->oacs = cpu_to_le16(nvme_init_ctrl_oacs(&n->cs.acs));
+
+    oncs = NVME_ONCS_TIMESTAMP | NVME_ONCS_FEATURES;
+    nvme_init_ctrl_oncs_iocss(n, &oncs);
+    id->oncs = cpu_to_le16(oncs);
+
+    nvme_init_subnqn(n);
+
+    nvme_init_bar_defaults(&n->bar);
+    {
+        uint64_t cap = ldq_le_p(&n->bar.cap);
+        NVME_CAP_SET_MQES(cap, n->params.mqes);
+        NVME_CAP_SET_CMBS(cap, n->params.cmb_size_mb ? 1 : 0);
+        NVME_CAP_SET_PMRS(cap, n->pmr.dev ? 1 : 0);
+        stq_le_p(&n->bar.cap, cap);
+    }
     if (pci_is_vf(pci_dev) && !sctrl->scs) {
         stl_le_p(&n->bar.csts, NVME_CSTS_FAILED);
     }
