@@ -6363,40 +6363,42 @@ static DOEProtocol doe_spdm_prot[] = {
     { }
 };
 
-static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
+static void nvme_init_pci_defaults(PCIDevice *pci_dev)
 {
-    ERRP_GUARD();
     uint8_t *pci_conf = pci_dev->config;
-    uint64_t bar_size;
-    unsigned msix_table_offset = 0, msix_pba_offset = 0;
-    unsigned nr_vectors;
-    int ret;
 
     pci_conf[PCI_INTERRUPT_PIN] = pci_is_vf(pci_dev) ? 0 : 1;
     pci_config_set_prog_interface(pci_conf, 0x2);
 
-    if (n->params.use_intel_id) {
-        pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
-        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_NVME);
-    } else {
-        pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_REDHAT);
-        pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_REDHAT_NVME);
-    }
+    pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_REDHAT);
+    pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_REDHAT_NVME);
 
     pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
     nvme_add_pm_capability(pci_dev, 0x60);
     pcie_endpoint_cap_init(pci_dev, 0x80);
     pcie_cap_flr_init(pci_dev);
-    if (n->params.sriov_max_vfs) {
-        pcie_ari_init(pci_dev, 0x100);
-    }
+}
+
+static void nvme_init_pci_ari(PCIDevice *pci_dev)
+{
+    pcie_ari_init(pci_dev, 0x100);
+}
+
+static bool nvme_init_pci_msix(NvmeCtrl *n, PCIDevice *pci_dev, MemoryRegion *bar0, MemoryRegion *iomem, Error **errp)
+{
+    ERRP_GUARD();
+    /* TODO: remove need for NvmeCtrl */
+    uint64_t bar_size;
+    unsigned msix_table_offset = 0, msix_pba_offset = 0;
+    unsigned nr_vectors;
+    int ret;
 
     if (n->params.msix_exclusive_bar && !pci_is_vf(pci_dev)) {
         bar_size = nvme_mbar_size(n->params.max_ioqpairs + 1, 0, NULL, NULL);
-        memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+        memory_region_init_io(iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
                               bar_size);
         pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
-                         PCI_BASE_ADDRESS_MEM_TYPE_64, &n->iomem);
+                         PCI_BASE_ADDRESS_MEM_TYPE_64, iomem);
         ret = msix_init_exclusive_bar(pci_dev, n->params.msix_qsize, 4, errp);
     } else {
         assert(n->params.msix_qsize >= 1);
@@ -6428,13 +6430,93 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
                         &n->bar0, 0, msix_table_offset,
                         &n->bar0, 0, msix_pba_offset, 0, errp);
     }
-
     if (ret == -ENOTSUP) {
         /* report that msix is not supported, but do not error out */
         warn_report_err(*errp);
         *errp = NULL;
     } else if (ret < 0) {
         /* propagate error to caller */
+        return false;
+    }
+    return true;
+}
+
+static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
+{
+    ERRP_GUARD();
+    //uint8_t *pci_conf = pci_dev->config;
+    //uint64_t bar_size;
+    //unsigned msix_table_offset = 0, msix_pba_offset = 0;
+    //unsigned nr_vectors;
+    //int ret;
+
+    nvme_init_pci_defaults(pci_dev);
+    // pci_conf[PCI_INTERRUPT_PIN] = pci_is_vf(pci_dev) ? 0 : 1;
+    // pci_config_set_prog_interface(pci_conf, 0x2);
+
+    // if (n->params.use_intel_id) {
+    //     pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_INTEL);
+    //     pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_INTEL_NVME);
+    // } else {
+    //     pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_REDHAT);
+    //     pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_REDHAT_NVME);
+    // }
+
+    // pci_config_set_class(pci_conf, PCI_CLASS_STORAGE_EXPRESS);
+    // nvme_add_pm_capability(pci_dev, 0x60);
+    // pcie_endpoint_cap_init(pci_dev, 0x80);
+    // pcie_cap_flr_init(pci_dev);
+    if (n->params.sriov_max_vfs) {
+        nvme_init_pci_ari(pci_dev);
+    }
+
+    // if (n->params.msix_exclusive_bar && !pci_is_vf(pci_dev)) {
+    //     bar_size = nvme_mbar_size(n->params.max_ioqpairs + 1, 0, NULL, NULL);
+    //     memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+    //                           bar_size);
+    //     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
+    //                      PCI_BASE_ADDRESS_MEM_TYPE_64, &n->iomem);
+    //     ret = msix_init_exclusive_bar(pci_dev, n->params.msix_qsize, 4, errp);
+    // } else {
+    //     assert(n->params.msix_qsize >= 1);
+
+    //     /* add one to max_ioqpairs to account for the admin queue pair */
+    //     if (!pci_is_vf(pci_dev)) {
+    //         nr_vectors = n->params.msix_qsize;
+    //         bar_size = nvme_mbar_size(n->params.max_ioqpairs + 1,
+    //                                   nr_vectors, &msix_table_offset,
+    //                                   &msix_pba_offset);
+    //     } else {
+    //         NvmeCtrl *pn = NVME(pcie_sriov_get_pf(pci_dev));
+    //         NvmePriCtrlCap *cap = &pn->pri_ctrl_cap;
+
+    //         nr_vectors = le16_to_cpu(cap->vifrsm);
+    //         bar_size = nvme_mbar_size(le16_to_cpu(cap->vqfrsm), nr_vectors,
+    //                                   &msix_table_offset, &msix_pba_offset);
+    //     }
+
+    //     memory_region_init(&n->bar0, OBJECT(n), "nvme-bar0", bar_size);
+    //     memory_region_init_io(&n->iomem, OBJECT(n), &nvme_mmio_ops, n, "nvme",
+    //                           msix_table_offset);
+    //     memory_region_add_subregion(&n->bar0, 0, &n->iomem);
+
+    //     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY |
+    //                      PCI_BASE_ADDRESS_MEM_TYPE_64, &n->bar0);
+
+    //     ret = msix_init(pci_dev, nr_vectors,
+    //                     &n->bar0, 0, msix_table_offset,
+    //                     &n->bar0, 0, msix_pba_offset, 0, errp);
+    // }
+
+    // if (ret == -ENOTSUP) {
+    //     /* report that msix is not supported, but do not error out */
+    //     warn_report_err(*errp);
+    //     *errp = NULL;
+    // } else if (ret < 0) {
+    //     /* propagate error to caller */
+    //     return false;
+    // }
+    if (!nvme_init_pci_msix(n, pci_dev, &n->bar0, &n->iomem, errp)) {
         return false;
     }
 
