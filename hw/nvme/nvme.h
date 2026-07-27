@@ -590,11 +590,29 @@ typedef struct NvmeParams {
     bool     atomic_dn;
 } NvmeParams;
 
+typedef struct NvmeLogRqCtx {
+    uint64_t off;
+    size_t len;
+    uint32_t lspi;
+    uint8_t lid;
+    uint8_t lsp;
+    uint8_t rae;
+    uint8_t csi;
+} NvmeLogRqCtx;
+
+typedef uint16_t (*NvmeLogFn)(NvmeCtrl *n, NvmeRequest *req, NvmeLogRqCtx *ctx);
+
+#define NVME_LOG_ID_MAX 255
+typedef struct NvmeLogSet {
+    NvmeLogFn cmds[NVME_LOG_ID_MAX + 1];
+} NvmeLogSet;
+
 typedef struct NvmeCtrlOps {
     void (*init_acs)(NvmeCtrl *n);
     void (*init_iocs)(NvmeCtrl *n);
     void (*init_features)(NvmeCtrl *n);
     void (*init_identify)(NvmeCtrl *n);
+    void (*init_log)(NvmeLogSet *ls);
 } NvmeCtrlOps;
 
 typedef struct NvmeIdDef {
@@ -670,6 +688,7 @@ typedef struct NvmeCtrl {
     } cs;
 
     NvmeIdSet id_ops;
+    NvmeLogSet log_ops;
 
     struct {
         MemoryRegion mem;
@@ -854,7 +873,6 @@ void nvme_ns_atomic_configure_boundary(bool dn, uint16_t nabsn,
 void nvme_set_timestamp(NvmeCtrl *n, uint64_t ts);
 uint64_t nvme_get_timestamp(const NvmeCtrl *n);
 
-uint16_t nvme_get_log(NvmeCtrl *n, NvmeRequest *req);
 int nvme_check_sqid(NvmeCtrl *n, uint16_t sqid);
 int nvme_check_cqid(NvmeCtrl *n, uint16_t cqid);
 

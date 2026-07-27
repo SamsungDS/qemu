@@ -6,6 +6,7 @@
 #include "cs_adm.h"
 #include "features.h"
 #include "identify.h"
+#include "log.h"
 #include "trace.h"
 
 uint16_t nvme_del_sq(NvmeCtrl *n, NvmeRequest *req)
