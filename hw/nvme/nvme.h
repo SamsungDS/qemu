@@ -26,6 +26,7 @@
 #include "block/nvme.h"
 #include "ext.h"
 #include "ext_cmb.h"
+#include "ext_pmr.h"
 
 #define NVME_TEMPERATURE 0x143
 #define NVME_TEMPERATURE_WARNING 0x157
@@ -698,13 +699,9 @@ typedef struct NvmeCtrl {
 
     struct {
         NvmeExtCmbState cmb;
+        NvmeExtPmrState pmr;
     } state;
 
-    struct {
-        HostMemoryBackend *dev;
-        bool              cmse;
-        hwaddr            cba;
-    } pmr;
 
     uint8_t     aer_mask;
     NvmeRequest **aer_reqs;

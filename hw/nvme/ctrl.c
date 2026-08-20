@@ -223,7 +223,6 @@
 #define NVME_MAX_IOQPAIRS 0xffff
 #define NVME_DB_SIZE  4
 #define NVME_SPEC_VER 0x00010400
-#define NVME_PMR_BIR 4
 #define NVME_NUM_FW_SLOTS 1
 #define NVME_DEFAULT_MAX_ZA_SIZE (128 * KiB)
 #define NVME_VF_RES_GRANULARITY 1
@@ -434,24 +433,6 @@ static bool nvme_update_ruh(NvmeCtrl *n, NvmeNamespace *ns, uint16_t pid)
     return true;
 }
 
-static bool nvme_addr_is_pmr(NvmeCtrl *n, hwaddr addr)
-{
-    hwaddr hi;
-
-    if (!n->pmr.cmse) {
-        return false;
-    }
-
-    hi = n->pmr.cba + int128_get64(n->pmr.dev->mr.size);
-
-    return addr >= n->pmr.cba && addr < hi;
-}
-
-static inline void *nvme_addr_to_pmr(NvmeCtrl *n, hwaddr addr)
-{
-    return memory_region_get_ram_ptr(&n->pmr.dev->mr) + (addr - n->pmr.cba);
-}
-
 static inline bool nvme_addr_is_iomem(NvmeCtrl *n, hwaddr addr)
 {
     hwaddr hi, lo;
@@ -483,7 +464,7 @@ static int nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size)
     }
 
     if (nvme_addr_is_pmr(n, addr) && nvme_addr_is_pmr(n, hi)) {
-        memcpy(buf, nvme_addr_to_pmr(n, addr), size);
+        memcpy(buf, nvme_addr_to_pmr(&n->state.pmr, addr), size);
         return 0;
     }
 
@@ -503,7 +484,7 @@ static int nvme_addr_write(NvmeCtrl *n, hwaddr addr, const void *buf, int size)
     }
 
     if (nvme_addr_is_pmr(n, addr) && nvme_addr_is_pmr(n, hi)) {
-        memcpy(nvme_addr_to_pmr(n, addr), buf, size);
+        memcpy(nvme_addr_to_pmr(&n->state.pmr, addr), buf, size);
         return 0;
     }
 
@@ -684,22 +665,6 @@ static void nvme_sg_split(NvmeSg *sg, NvmeNamespace *ns, NvmeSg *data,
             sg_idx++;
         }
     }
-}
-
-static uint16_t nvme_map_addr_pmr(NvmeCtrl *n, QEMUIOVector *iov, hwaddr addr,
-                                  size_t len)
-{
-    if (!len) {
-        return NVME_SUCCESS;
-    }
-
-    if (!nvme_addr_is_pmr(n, addr) || !nvme_addr_is_pmr(n, addr + len - 1)) {
-        return NVME_DATA_TRAS_ERROR;
-    }
-
-    qemu_iovec_add(iov, nvme_addr_to_pmr(n, addr), len);
-
-    return NVME_SUCCESS;
 }
 
 static uint16_t nvme_map_addr(NvmeCtrl *n, NvmeSg *sg, hwaddr addr, size_t len)
@@ -5331,9 +5296,6 @@ static void nvme_ctrl_shutdown(NvmeCtrl *n)
     NvmeNamespace *ns;
     int i;
 
-    if (n->pmr.dev) {
-        memory_region_msync(&n->pmr.dev->mr, 0, n->pmr.dev->size);
-    }
     nvme_ext_call(n, NVME_EEV_CTRL_SHUTDOWN, NULL);
 
     for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
@@ -5610,12 +5572,12 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
 
         stl_le_p(&n->bar.pmrctl, data);
         if (NVME_PMRCTL_EN(data)) {
-            memory_region_set_enabled(&n->pmr.dev->mr, true);
+            memory_region_set_enabled(&n->state.pmr.dev->mr, true);
             pmrsts = 0;
         } else {
-            memory_region_set_enabled(&n->pmr.dev->mr, false);
+            memory_region_set_enabled(&n->state.pmr.dev->mr, false);
             NVME_PMRSTS_SET_NRDY(pmrsts, 1);
-            n->pmr.cmse = false;
+            n->state.pmr.cmse = false;
         }
         stl_le_p(&n->bar.pmrsts, pmrsts);
         return;
@@ -5637,20 +5599,20 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         }
 
         stl_le_p(&n->bar.pmrmscl, data);
-        n->pmr.cmse = false;
+        n->state.pmr.cmse = false;
 
         if (NVME_PMRMSCL_CMSE(data)) {
             uint64_t pmrmscu = ldl_le_p(&n->bar.pmrmscu);
             hwaddr cba = pmrmscu << 32 |
                 (NVME_PMRMSCL_CBA(data) << PMRMSCL_CBA_SHIFT);
-            if (cba + int128_get64(n->pmr.dev->mr.size) < cba) {
+            if (cba + int128_get64(n->state.pmr.dev->mr.size) < cba) {
                 NVME_PMRSTS_SET_CBAI(pmrsts, 1);
                 stl_le_p(&n->bar.pmrsts, pmrsts);
                 return;
             }
 
-            n->pmr.cmse = true;
-            n->pmr.cba = cba;
+            n->state.pmr.cmse = true;
+            n->state.pmr.cba = cba;
         }
 
         return;
@@ -5710,7 +5672,7 @@ static uint64_t nvme_mmio_read(void *opaque, hwaddr addr, unsigned size)
      */
     if (addr == NVME_REG_PMRSTS &&
         (NVME_PMRCAP_PMRWBM(ldl_le_p(&n->bar.pmrcap)) & 0x02)) {
-        memory_region_msync(&n->pmr.dev->mr, 0, n->pmr.dev->size);
+        memory_region_msync(&n->state.pmr.dev->mr, 0, n->state.pmr.dev->size);
     }
 
     return ldn_le_p(ptr + addr, size);
@@ -5952,26 +5914,6 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
         return false;
     }
 
-    if (n->pmr.dev) {
-        if (params->msix_exclusive_bar) {
-            error_setg(errp, "not enough BARs available to enable PMR");
-            return false;
-        }
-
-        if (host_memory_backend_is_mapped(n->pmr.dev)) {
-            error_setg(errp, "can't use already busy memdev: %s",
-                       object_get_canonical_path_component(OBJECT(n->pmr.dev)));
-            return false;
-        }
-
-        if (!is_power_of_2(n->pmr.dev->size)) {
-            error_setg(errp, "pmr backend size needs to be power of 2 in size");
-            return false;
-        }
-
-        host_memory_backend_set_mapped(n->pmr.dev, true);
-    }
-
     if (!n->params.mdts || ((1 << n->params.mdts) + 1) > IOV_MAX) {
         error_setg(errp, "mdts exceeds IOV_MAX");
         return false;
@@ -5999,7 +5941,7 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
             return false;
         }
 
-        if (n->pmr.dev) {
+        if (nvme_ext_enabled(&n->exts, NVME_EXT_PMR)) {
             error_setg(errp, "PMR is not supported with SR-IOV");
             return false;
         }
@@ -6140,33 +6082,6 @@ static void nvme_init_state(NvmeCtrl *n)
                                              n->params.atomic_awupf,
                                              &n->atomic);
     }
-}
-
-static bool nvme_init_pmr(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
-{
-    uint32_t pmrcap = ldl_le_p(&n->bar.pmrcap);
-
-    if (memory_region_size(&n->pmr.dev->mr) < 16) {
-        error_setg(errp, "PMR device must have at least 16 bytes");
-        return false;
-    }
-
-    NVME_PMRCAP_SET_RDS(pmrcap, 1);
-    NVME_PMRCAP_SET_WDS(pmrcap, 1);
-    NVME_PMRCAP_SET_BIR(pmrcap, NVME_PMR_BIR);
-    /* Turn on bit 1 support */
-    NVME_PMRCAP_SET_PMRWBM(pmrcap, 0x02);
-    NVME_PMRCAP_SET_CMSS(pmrcap, 1);
-    stl_le_p(&n->bar.pmrcap, pmrcap);
-
-    pci_register_bar(pci_dev, NVME_PMR_BIR,
-                     PCI_BASE_ADDRESS_SPACE_MEMORY |
-                     PCI_BASE_ADDRESS_MEM_TYPE_64 |
-                     PCI_BASE_ADDRESS_MEM_PREFETCH, &n->pmr.dev->mr);
-
-    memory_region_set_enabled(&n->pmr.dev->mr, false);
-
-    return true;
 }
 
 static uint64_t nvme_mbar_size(unsigned total_queues, unsigned total_irqs,
@@ -6464,12 +6379,6 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
 
     if (!nvme_ext_call(n, NVME_EEV_INIT_PCI, errp)) {
         return false;
-    }
-
-    if (n->pmr.dev) {
-        if (!nvme_init_pmr(n, pci_dev, errp)) {
-            return false;
-        }
     }
 
     return true;
@@ -6777,7 +6686,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
         uint64_t cap = ldq_le_p(&n->bar.cap);
         NVME_CAP_SET_MQES(cap, n->params.mqes);
         NVME_CAP_SET_CMBS(cap, n->exts.enabled[NVME_EXT_CMB]);
-        NVME_CAP_SET_PMRS(cap, n->pmr.dev ? 1 : 0);
+        NVME_CAP_SET_PMRS(cap, n->exts.enabled[NVME_EXT_PMR]);
         stq_le_p(&n->bar.cap, cap);
     }
     if (pci_is_vf(pci_dev) && !sctrl->scs) {
@@ -6932,10 +6841,6 @@ static void nvme_exit(PCIDevice *pci_dev)
                           SPDM_SOCKET_TRANSPORT_TYPE_NVME);
     }
 
-    if (n->pmr.dev) {
-        host_memory_backend_set_mapped(n->pmr.dev, false);
-    }
-
     if (!pci_is_vf(pci_dev) && n->params.sriov_max_vfs) {
         pcie_sriov_pf_exit(pci_dev);
     }
@@ -6951,7 +6856,7 @@ static void nvme_exit(PCIDevice *pci_dev)
 
 static const Property nvme_props[] = {
     DEFINE_BLOCK_PROPERTIES(NvmeCtrl, namespace.blkconf),
-    DEFINE_PROP_LINK("pmrdev", NvmeCtrl, pmr.dev, TYPE_MEMORY_BACKEND,
+    DEFINE_PROP_LINK("pmrdev", NvmeCtrl, state.pmr.dev, TYPE_MEMORY_BACKEND,
                      HostMemoryBackend *),
     DEFINE_PROP_LINK("subsys", NvmeCtrl, subsys, TYPE_NVME_SUBSYS,
                      NvmeSubsystem *),

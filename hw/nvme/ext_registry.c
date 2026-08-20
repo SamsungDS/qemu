@@ -1,8 +1,10 @@
 #include "ext.h"
 #include "ext_registry.h"
 #include "ext_cmb.h"
+#include "ext_pmr.h"
 
 static const NvmeExtHook nvme_hooks_check_params[] = {
+    { nvme_pmr_on_check_params, NVME_EXT_PMR },
 };
 
 static const NvmeExtHook nvme_hooks_init_state[] = {
@@ -11,9 +13,11 @@ static const NvmeExtHook nvme_hooks_init_state[] = {
 
 static const NvmeExtHook nvme_hooks_init_pci[] = {
     { nvme_cmb_on_init_pci, NVME_EXT_CMB },
+    { nvme_pmr_on_init_pci, NVME_EXT_PMR },
 };
 
 static const NvmeExtHook nvme_hooks_ctrl_shutdown[] = {
+    { nvme_pmr_on_ctrl_shutdown, NVME_EXT_PMR },
 };
 
 static const NvmeExtHook nvme_hooks_exit[] = {
