@@ -211,6 +211,7 @@
 #include "system/spdm-socket.h"
 #include "migration/vmstate.h"
 
+#include "ext.h"
 #include "nvme.h"
 #include "dif.h"
 #include "features.h"
@@ -5372,6 +5373,7 @@ static void nvme_ctrl_shutdown(NvmeCtrl *n)
     if (n->pmr.dev) {
         memory_region_msync(&n->pmr.dev->mr, 0, n->pmr.dev->size);
     }
+    nvme_ext_call(n, NVME_EEV_CTRL_SHUTDOWN, NULL);
 
     for (i = 1; i <= NVME_MAX_NAMESPACES; i++) {
         ns = nvme_ns(n, i);
@@ -6132,6 +6134,10 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
         }
     }
 
+    if (!nvme_ext_call(n, NVME_EEV_CHECK_PARAMS, errp)) {
+        return false;
+    }
+
     return true;
 }
 
@@ -6564,6 +6570,10 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
         nvme_init_cmb(n, pci_dev);
     }
 
+    if (!nvme_ext_call(n, NVME_EEV_INIT_PCI, errp)) {
+        return false;
+    }
+
     if (n->pmr.dev) {
         if (!nvme_init_pmr(n, pci_dev, errp)) {
             return false;
@@ -6940,6 +6950,9 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
     NvmeNamespace *ns;
     NvmeCtrl *pn = NVME(pcie_sriov_get_pf(pci_dev));
 
+    nc->init_exts(n);
+    nvme_ext_init(&n->exts);
+
     nc->init_ops(n, &n->ops);
 
     if (pci_is_vf(pci_dev)) {
@@ -7017,6 +7030,9 @@ static void nvme_exit(PCIDevice *pci_dev)
     if (n->params.cmb_size_mb) {
         g_free(n->cmb.buf);
     }
+
+    /* ignore return; best effort */
+    nvme_ext_call(n, NVME_EEV_EXIT, NULL);
 
     /* Only one of the `spdm_socket`s below should have been setup */
     assert(!(pci_dev->doe_spdm.spdm_socket > 0 && n->spdm_socket >= 0));
@@ -7196,6 +7212,10 @@ static void nvme_init_ops_default(NvmeCtrl *n, NvmeCtrlOps *ops)
     ops->init_log = nvme_init_ctrl_log_default;
 }
 
+static void nvme_init_exts_default(NvmeCtrl *n)
+{
+}
+
 static void nvme_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -7216,6 +7236,7 @@ static void nvme_class_init(ObjectClass *oc, const void *data)
     device_class_set_legacy_reset(dc, nvme_pci_reset);
 
     nc->init_ops = nvme_init_ops_default;
+    nc->init_exts = nvme_init_exts_default;
 }
 
 static void nvme_instance_init(Object *obj)

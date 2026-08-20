@@ -24,6 +24,7 @@
 #include "qemu/cutils.h"
 
 #include "block/nvme.h"
+#include "ext.h"
 
 #define NVME_TEMPERATURE 0x143
 #define NVME_TEMPERATURE_WARNING 0x157
@@ -644,6 +645,7 @@ typedef struct NvmeCtrlClass {
     PCIDeviceClass parent_class;
 
     void (*init_ops)(NvmeCtrl *n, NvmeCtrlOps *ops);
+    void (*init_exts)(NvmeCtrl *n);
 } NvmeCtrlClass;
 
 typedef struct NvmeCtrl {
@@ -676,6 +678,8 @@ typedef struct NvmeCtrl {
     uint64_t    dbbuf_eis;
     bool        dbbuf_enabled;
 
+    NvmeExtRegistry exts;
+
     struct {
         NvmeCmdSet acs;
         struct {
@@ -697,6 +701,9 @@ typedef struct NvmeCtrl {
         bool         cmse;
         hwaddr       cba;
     } cmb;
+
+    struct {
+    } state;
 
     struct {
         HostMemoryBackend *dev;
