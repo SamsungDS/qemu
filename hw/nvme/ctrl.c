@@ -223,7 +223,6 @@
 #define NVME_MAX_IOQPAIRS 0xffff
 #define NVME_DB_SIZE  4
 #define NVME_SPEC_VER 0x00010400
-#define NVME_CMB_BIR 2
 #define NVME_PMR_BIR 4
 #define NVME_NUM_FW_SLOTS 1
 #define NVME_DEFAULT_MAX_ZA_SIZE (128 * KiB)
@@ -435,26 +434,6 @@ static bool nvme_update_ruh(NvmeCtrl *n, NvmeNamespace *ns, uint16_t pid)
     return true;
 }
 
-static bool nvme_addr_is_cmb(NvmeCtrl *n, hwaddr addr)
-{
-    hwaddr hi, lo;
-
-    if (!n->cmb.cmse) {
-        return false;
-    }
-
-    lo = n->params.legacy_cmb ? n->cmb.mem.addr : n->cmb.cba;
-    hi = lo + int128_get64(n->cmb.mem.size);
-
-    return addr >= lo && addr < hi;
-}
-
-static inline void *nvme_addr_to_cmb(NvmeCtrl *n, hwaddr addr)
-{
-    hwaddr base = n->params.legacy_cmb ? n->cmb.mem.addr : n->cmb.cba;
-    return &n->cmb.buf[addr - base];
-}
-
 static bool nvme_addr_is_pmr(NvmeCtrl *n, hwaddr addr)
 {
     hwaddr hi;
@@ -499,7 +478,7 @@ static int nvme_addr_read(NvmeCtrl *n, hwaddr addr, void *buf, int size)
     }
 
     if (n->bar.cmbsz && nvme_addr_is_cmb(n, addr) && nvme_addr_is_cmb(n, hi)) {
-        memcpy(buf, nvme_addr_to_cmb(n, addr), size);
+        memcpy(buf, nvme_addr_to_cmb(&n->state.cmb, addr), size);
         return 0;
     }
 
@@ -519,7 +498,7 @@ static int nvme_addr_write(NvmeCtrl *n, hwaddr addr, const void *buf, int size)
     }
 
     if (n->bar.cmbsz && nvme_addr_is_cmb(n, addr) && nvme_addr_is_cmb(n, hi)) {
-        memcpy(nvme_addr_to_cmb(n, addr), buf, size);
+        memcpy(nvme_addr_to_cmb(&n->state.cmb, addr), buf, size);
         return 0;
     }
 
@@ -705,24 +684,6 @@ static void nvme_sg_split(NvmeSg *sg, NvmeNamespace *ns, NvmeSg *data,
             sg_idx++;
         }
     }
-}
-
-static uint16_t nvme_map_addr_cmb(NvmeCtrl *n, QEMUIOVector *iov, hwaddr addr,
-                                  size_t len)
-{
-    if (!len) {
-        return NVME_SUCCESS;
-    }
-
-    trace_pci_nvme_map_addr_cmb(addr, len);
-
-    if (!nvme_addr_is_cmb(n, addr) || !nvme_addr_is_cmb(n, addr + len - 1)) {
-        return NVME_DATA_TRAS_ERROR;
-    }
-
-    qemu_iovec_add(iov, nvme_addr_to_cmb(n, addr), len);
-
-    return NVME_SUCCESS;
 }
 
 static uint16_t nvme_map_addr_pmr(NvmeCtrl *n, QEMUIOVector *iov, hwaddr addr,
@@ -5471,26 +5432,6 @@ static int nvme_start_ctrl(NvmeCtrl *n)
     return 0;
 }
 
-static void nvme_cmb_enable_regs(NvmeCtrl *n)
-{
-    uint32_t cmbloc = ldl_le_p(&n->bar.cmbloc);
-    uint32_t cmbsz = ldl_le_p(&n->bar.cmbsz);
-
-    NVME_CMBLOC_SET_CDPCILS(cmbloc, 1);
-    NVME_CMBLOC_SET_CDPMLS(cmbloc, 1);
-    NVME_CMBLOC_SET_BIR(cmbloc, NVME_CMB_BIR);
-    stl_le_p(&n->bar.cmbloc, cmbloc);
-
-    NVME_CMBSZ_SET_SQS(cmbsz, 1);
-    NVME_CMBSZ_SET_CQS(cmbsz, 0);
-    NVME_CMBSZ_SET_LISTS(cmbsz, 1);
-    NVME_CMBSZ_SET_RDS(cmbsz, 1);
-    NVME_CMBSZ_SET_WDS(cmbsz, 1);
-    NVME_CMBSZ_SET_SZU(cmbsz, 2); /* MBs */
-    NVME_CMBSZ_SET_SZ(cmbsz, n->params.cmb_size_mb);
-    stl_le_p(&n->bar.cmbsz, cmbsz);
-}
-
 static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
                            unsigned size)
 {
@@ -5630,7 +5571,7 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
         }
 
         stn_le_p(&n->bar.cmbmsc, size, data);
-        n->cmb.cmse = false;
+        n->state.cmb.cmse = false;
 
         if (NVME_CMBMSC_CRE(data)) {
             nvme_cmb_enable_regs(n);
@@ -5638,15 +5579,15 @@ static void nvme_write_bar(NvmeCtrl *n, hwaddr offset, uint64_t data,
             if (NVME_CMBMSC_CMSE(data)) {
                 uint64_t cmbmsc = ldq_le_p(&n->bar.cmbmsc);
                 hwaddr cba = NVME_CMBMSC_CBA(cmbmsc) << CMBMSC_CBA_SHIFT;
-                if (cba + int128_get64(n->cmb.mem.size) < cba) {
+                if (cba + int128_get64(n->state.cmb.mem.size) < cba) {
                     uint32_t cmbsts = ldl_le_p(&n->bar.cmbsts);
                     NVME_CMBSTS_SET_CBAI(cmbsts, 1);
                     stl_le_p(&n->bar.cmbsts, cmbsts);
                     return;
                 }
 
-                n->cmb.cba = cba;
-                n->cmb.cmse = true;
+                n->state.cmb.cba = cba;
+                n->state.cmb.cmse = true;
             }
         } else {
             n->bar.cmbsz = 0;
@@ -5951,29 +5892,6 @@ static const MemoryRegionOps nvme_mmio_ops = {
     },
 };
 
-static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data,
-                           unsigned size)
-{
-    NvmeCtrl *n = (NvmeCtrl *)opaque;
-    stn_le_p(&n->cmb.buf[addr], size, data);
-}
-
-static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
-{
-    NvmeCtrl *n = (NvmeCtrl *)opaque;
-    return ldn_le_p(&n->cmb.buf[addr], size);
-}
-
-static const MemoryRegionOps nvme_cmb_ops = {
-    .read = nvme_cmb_read,
-    .write = nvme_cmb_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-    .impl = {
-        .min_access_size = 1,
-        .max_access_size = 8,
-    },
-};
-
 static bool nvme_check_params(NvmeCtrl *n, Error **errp)
 {
     NvmeParams *params = &n->params;
@@ -6076,7 +5994,7 @@ static bool nvme_check_params(NvmeCtrl *n, Error **errp)
             return false;
         }
 
-        if (params->cmb_size_mb) {
+        if (params->cmb.size_mb) {
             error_setg(errp, "CMB is not supported with SR-IOV");
             return false;
         }
@@ -6221,28 +6139,6 @@ static void nvme_init_state(NvmeCtrl *n)
         nvme_atomic_configure_max_write_size(n->dn, n->params.atomic_awun,
                                              n->params.atomic_awupf,
                                              &n->atomic);
-    }
-}
-
-static void nvme_init_cmb(NvmeCtrl *n, PCIDevice *pci_dev)
-{
-    uint64_t cmb_size = n->params.cmb_size_mb * MiB;
-    uint64_t cap = ldq_le_p(&n->bar.cap);
-
-    n->cmb.buf = g_malloc0(cmb_size);
-    memory_region_init_io(&n->cmb.mem, OBJECT(n), &nvme_cmb_ops, n,
-                          "nvme-cmb", cmb_size);
-    pci_register_bar(pci_dev, NVME_CMB_BIR,
-                     PCI_BASE_ADDRESS_SPACE_MEMORY |
-                     PCI_BASE_ADDRESS_MEM_TYPE_64 |
-                     PCI_BASE_ADDRESS_MEM_PREFETCH, &n->cmb.mem);
-
-    NVME_CAP_SET_CMBS(cap, 1);
-    stq_le_p(&n->bar.cap, cap);
-
-    if (n->params.legacy_cmb) {
-        nvme_cmb_enable_regs(n);
-        n->cmb.cmse = true;
     }
 }
 
@@ -6566,10 +6462,6 @@ static bool nvme_init_pci(NvmeCtrl *n, PCIDevice *pci_dev, Error **errp)
         }
     }
 
-    if (n->params.cmb_size_mb) {
-        nvme_init_cmb(n, pci_dev);
-    }
-
     if (!nvme_ext_call(n, NVME_EEV_INIT_PCI, errp)) {
         return false;
     }
@@ -6884,7 +6776,7 @@ static void nvme_init_ctrl(NvmeCtrl *n, PCIDevice *pci_dev)
     {
         uint64_t cap = ldq_le_p(&n->bar.cap);
         NVME_CAP_SET_MQES(cap, n->params.mqes);
-        NVME_CAP_SET_CMBS(cap, n->params.cmb_size_mb ? 1 : 0);
+        NVME_CAP_SET_CMBS(cap, n->exts.enabled[NVME_EXT_CMB]);
         NVME_CAP_SET_PMRS(cap, n->pmr.dev ? 1 : 0);
         stq_le_p(&n->bar.cap, cap);
     }
@@ -7027,10 +6919,6 @@ static void nvme_exit(PCIDevice *pci_dev)
     g_free(n->sq);
     g_free(n->aer_reqs);
 
-    if (n->params.cmb_size_mb) {
-        g_free(n->cmb.buf);
-    }
-
     /* ignore return; best effort */
     nvme_ext_call(n, NVME_EEV_EXIT, NULL);
 
@@ -7070,7 +6958,7 @@ static const Property nvme_props[] = {
     DEFINE_PROP_STRING("serial", NvmeCtrl, params.serial),
     DEFINE_PROP_STRING("model", NvmeCtrl, params.model),
     DEFINE_PROP_STRING("firmware-version", NvmeCtrl, params.firmware_version),
-    DEFINE_PROP_UINT32("cmb_size_mb", NvmeCtrl, params.cmb_size_mb, 0),
+    DEFINE_PROP_UINT32("cmb_size_mb", NvmeCtrl, params.cmb.size_mb, 0),
     DEFINE_PROP_UINT32("num_queues", NvmeCtrl, params.num_queues, 0),
     DEFINE_PROP_UINT32("max_ioqpairs", NvmeCtrl, params.max_ioqpairs, 64),
     DEFINE_PROP_UINT16("msix_qsize", NvmeCtrl, params.msix_qsize, 65),
@@ -7079,7 +6967,7 @@ static const Property nvme_props[] = {
     DEFINE_PROP_UINT8("mdts", NvmeCtrl, params.mdts, 7),
     DEFINE_PROP_UINT8("vsl", NvmeCtrl, params.vsl, 7),
     DEFINE_PROP_BOOL("use-intel-id", NvmeCtrl, params.use_intel_id, false),
-    DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.legacy_cmb, false),
+    DEFINE_PROP_BOOL("legacy-cmb", NvmeCtrl, params.cmb.legacy_mode, false),
     DEFINE_PROP_BOOL("ioeventfd", NvmeCtrl, params.ioeventfd, false),
     DEFINE_PROP_BOOL("dbcs", NvmeCtrl, params.dbcs, true),
     DEFINE_PROP_UINT8("zoned.zasl", NvmeCtrl, params.zasl, 0),
@@ -7214,6 +7102,9 @@ static void nvme_init_ops_default(NvmeCtrl *n, NvmeCtrlOps *ops)
 
 static void nvme_init_exts_default(NvmeCtrl *n)
 {
+    if (n->params.cmb.size_mb) {
+        nvme_ext_enable(&n->exts, NVME_EXT_CMB, &n->params.cmb);
+    }
 }
 
 static void nvme_class_init(ObjectClass *oc, const void *data)

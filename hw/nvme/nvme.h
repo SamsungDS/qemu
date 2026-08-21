@@ -25,6 +25,7 @@
 
 #include "block/nvme.h"
 #include "ext.h"
+#include "ext_cmb.h"
 
 #define NVME_TEMPERATURE 0x143
 #define NVME_TEMPERATURE_WARNING 0x157
@@ -564,7 +565,6 @@ typedef struct NvmeParams {
     uint32_t max_ioqpairs;
     uint16_t msix_qsize;
     uint16_t mqes;
-    uint32_t cmb_size_mb;
     uint8_t  aerl;
     uint32_t aer_max_queued;
     uint8_t  mdts;
@@ -572,7 +572,6 @@ typedef struct NvmeParams {
     bool     use_intel_id;
     uint8_t  zasl;
     bool     auto_transition_zones;
-    bool     legacy_cmb;
     bool     ioeventfd;
     bool     dbcs;
     uint16_t  sriov_max_vfs;
@@ -582,6 +581,8 @@ typedef struct NvmeParams {
     uint32_t  sriov_max_vi_per_vf;
     bool     msix_exclusive_bar;
     bool     ocp;
+
+    NvmeExtCmbParams cmb;
 
     struct {
         bool mem;
@@ -696,13 +697,7 @@ typedef struct NvmeCtrl {
     NvmeLogSet log_ops;
 
     struct {
-        MemoryRegion mem;
-        uint8_t      *buf;
-        bool         cmse;
-        hwaddr       cba;
-    } cmb;
-
-    struct {
+        NvmeExtCmbState cmb;
     } state;
 
     struct {

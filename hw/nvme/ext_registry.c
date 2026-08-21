@@ -1,19 +1,23 @@
 #include "ext.h"
 #include "ext_registry.h"
+#include "ext_cmb.h"
 
 static const NvmeExtHook nvme_hooks_check_params[] = {
 };
 
 static const NvmeExtHook nvme_hooks_init_state[] = {
+    { nvme_cmb_on_init_state, NVME_EXT_CMB },
 };
 
 static const NvmeExtHook nvme_hooks_init_pci[] = {
+    { nvme_cmb_on_init_pci, NVME_EXT_CMB },
 };
 
 static const NvmeExtHook nvme_hooks_ctrl_shutdown[] = {
 };
 
 static const NvmeExtHook nvme_hooks_exit[] = {
+    { nvme_cmb_on_exit, NVME_EXT_CMB },
 };
 
 #define PHASE_HOOKS(hooks) \

@@ -4,6 +4,7 @@
 
 typedef enum NvmeExtensionId {
     NVME_EXT_NONE = 0,
+    NVME_EXT_CMB,
     NVME_EXT_COUNT,
 } NvmeExtensionId;
 
